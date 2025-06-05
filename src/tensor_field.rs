@@ -1,5 +1,3 @@
-use std::io::Read;
-
 use nalgebra::{Matrix2, Vector2};
 
 pub const GRID_SIZE: usize = 512;
@@ -54,7 +52,7 @@ impl TensorField {
     }
 
     pub fn trace(&self, seed: Point, h: f32) -> Vec<Point> {
-        println!("tracing, {seed}");
+        // println!("tracing, {seed}");
         if seed.x < 0.0 || seed.y < 0.0 || seed.x > GRID_SIZE as f32 || seed.y > GRID_SIZE as f32 {
             return Vec::new();
         }
@@ -65,18 +63,12 @@ impl TensorField {
             return Vec::new();
         }
 
-        let seed_eigenvectors = tensor.eigenvectors();
-
-        dbg!(&seed_eigenvectors);
-
-        if (seed_eigenvectors.major.x - seed_eigenvectors.minor.x).abs() < 0.000001
-            && (seed_eigenvectors.major.y - seed_eigenvectors.minor.y).abs() < 0.000001
-        {
-            println!("Degenerate point at {seed}");
+        if tensor.norm_squared() <= 0.00001 {
+            // println!("Degenerate point at {seed}");
             return Vec::new();
         }
 
-        let k_1 = seed_eigenvectors.major;
+        let k_1 = tensor.eigenvectors().major;
         let k_2 = self
             .evaluate_field_at_point(seed + h / 2.0 * k_1)
             .eigenvectors()
@@ -100,22 +92,6 @@ impl TensorField {
             .chain(next_trace.into_iter())
             .collect()
     }
-
-    /* pub fn solve_full_field(&mut self) {
-        let field: [[Tensor; GRID_SIZE]; GRID_SIZE] = (0..GRID_SIZE)
-            .map(|y| {
-                let arr: [Tensor; GRID_SIZE] = (0..GRID_SIZE)
-                    .map(|x| self.evaluate_field_at_point(Point::new(x as f32, y as f32)))
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap();
-                arr
-            })
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
-        self.field = Some(field);
-    } */
 }
 
 #[derive(Debug)]
@@ -223,5 +199,19 @@ impl EvalEigenvectors for Tensor {
                 minor: vectors[0],
             }
         }
+    }
+}
+
+#[derive(PartialEq, PartialOrd)]
+pub struct SeedPoint {
+    pub seed: Point,
+    pub priority: f32,
+}
+
+impl Eq for SeedPoint {}
+
+impl Ord for SeedPoint {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.priority.total_cmp(&other.priority).reverse()
     }
 }
