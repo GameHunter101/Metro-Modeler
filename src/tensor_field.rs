@@ -1,6 +1,8 @@
+use std::io::Read;
+
 use nalgebra::{Matrix2, Vector2};
 
-const GRID_SIZE: usize = 512;
+pub const GRID_SIZE: usize = 512;
 
 type Tensor = Matrix2<f32>;
 type Point = Vector2<f32>;
@@ -9,23 +11,23 @@ type Point = Vector2<f32>;
 pub struct TensorField {
     design_elements: Vec<DesignElement>,
     decay_constant: f32,
-    field: Option<[[Tensor; GRID_SIZE]; GRID_SIZE]>,
+    // pub field: Option<[[Tensor; GRID_SIZE]; GRID_SIZE]>,
 }
 
 impl TensorField {
-    fn new(design_elements: Vec<DesignElement>, decay_constant: f32) -> TensorField {
+    pub fn new(design_elements: Vec<DesignElement>, decay_constant: f32) -> TensorField {
         TensorField {
             design_elements,
             decay_constant,
-            field: None,
+            // field: None,
         }
     }
 
-    fn add_design_element(&mut self, design_element: DesignElement) {
+    pub fn add_design_element(&mut self, design_element: DesignElement) {
         self.design_elements.push(design_element);
     }
 
-    fn remove_design_element(&mut self, index: usize) {
+    pub fn remove_design_element(&mut self, index: usize) {
         self.design_elements.remove(index);
     }
 
@@ -47,11 +49,59 @@ impl TensorField {
             .sum()
     }
 
-    fn evaluate_field_at_point(&self, point: Point) -> Tensor {
+    pub fn evaluate_field_at_point(&self, point: Point) -> Tensor {
         Self::sum_elements(&self.design_elements, point, self.decay_constant)
     }
 
-    fn solve_full_field(&mut self) {
+    pub fn trace(&self, seed: Point, h: f32) -> Vec<Point> {
+        println!("tracing, {seed}");
+        if seed.x < 0.0 || seed.y < 0.0 || seed.x > GRID_SIZE as f32 || seed.y > GRID_SIZE as f32 {
+            return Vec::new();
+        }
+
+        let tensor = self.evaluate_field_at_point(seed);
+
+        if tensor.eigenvalues().is_none() {
+            return Vec::new();
+        }
+
+        let seed_eigenvectors = tensor.eigenvectors();
+
+        dbg!(&seed_eigenvectors);
+
+        if (seed_eigenvectors.major.x - seed_eigenvectors.minor.x).abs() < 0.000001
+            && (seed_eigenvectors.major.y - seed_eigenvectors.minor.y).abs() < 0.000001
+        {
+            println!("Degenerate point at {seed}");
+            return Vec::new();
+        }
+
+        let k_1 = seed_eigenvectors.major;
+        let k_2 = self
+            .evaluate_field_at_point(seed + h / 2.0 * k_1)
+            .eigenvectors()
+            .major;
+        let k_3 = self
+            .evaluate_field_at_point(seed + h / 2.0 * k_2)
+            .eigenvectors()
+            .major;
+        let k_4 = self
+            .evaluate_field_at_point(seed + h * k_3)
+            .eigenvectors()
+            .major;
+
+        let m = 1.0 / 6.0 * (k_1 + 2.0 * (k_2 + k_3) + k_4);
+
+        let new_pos = seed + h * m;
+
+        let next_trace = self.trace(new_pos, h);
+        [new_pos]
+            .into_iter()
+            .chain(next_trace.into_iter())
+            .collect()
+    }
+
+    /* pub fn solve_full_field(&mut self) {
         let field: [[Tensor; GRID_SIZE]; GRID_SIZE] = (0..GRID_SIZE)
             .map(|y| {
                 let arr: [Tensor; GRID_SIZE] = (0..GRID_SIZE)
@@ -65,15 +115,15 @@ impl TensorField {
             .try_into()
             .unwrap();
         self.field = Some(field);
-    }
+    } */
 }
 
 #[derive(Debug)]
 pub enum DesignElement {
     Grid {
         center: Point,
-        width: f32,
-        height: f32,
+        theta: f32,
+        length: f32,
     },
     Radial {
         center: Point,
@@ -87,11 +137,9 @@ pub enum DesignElement {
 impl DesignElement {
     pub fn evaluate_at_point(&self, point: Point) -> Tensor {
         match self {
-            DesignElement::Grid { width, height, .. } => {
-                let theta = (height / width).atan();
-                let len = (height * height + width * width).sqrt();
+            DesignElement::Grid { theta, length, .. } => {
                 let theta_2 = 2.0 * theta;
-                len * Tensor::new(theta_2.cos(), theta_2.sin(), theta_2.sin(), -theta_2.cos())
+                *length * Tensor::new(theta_2.cos(), theta_2.sin(), theta_2.sin(), -theta_2.cos())
             }
             DesignElement::Radial { center } => {
                 let x = point.x - center.x;
@@ -113,11 +161,11 @@ impl DesignElement {
             } => {
                 let lines = (0..points.len() - 1)
                     .map(|i| {
-                        let dir = points[i + 1] - points[i];
+                        let dir = (points[i + 1] - points[i]).normalize();
                         DesignElement::Grid {
                             center: points[i],
-                            width: dir.x,
-                            height: dir.y,
+                            theta: dir.y.atan2(dir.x) + std::f32::consts::FRAC_PI_2,
+                            length: 1.0,
                         }
                     })
                     .collect::<Vec<DesignElement>>();
@@ -136,14 +184,20 @@ impl DesignElement {
     }
 }
 
-pub trait Eigenvectors {
-    fn eigenvectors(&self) -> [Vector2<f32>; 2];
+#[derive(Debug)]
+pub struct Eigenvectors {
+    pub major: Vector2<f32>,
+    pub minor: Vector2<f32>,
 }
 
-impl Eigenvectors for Tensor {
-    fn eigenvectors(&self) -> [Vector2<f32>; 2] {
+pub trait EvalEigenvectors {
+    fn eigenvectors(&self) -> Eigenvectors;
+}
+
+impl EvalEigenvectors for Tensor {
+    fn eigenvectors(&self) -> Eigenvectors {
         let eigenvalues = self.eigenvalues().unwrap();
-        eigenvalues
+        let vectors: Vec<Vector2<f32>> = eigenvalues
             .into_iter()
             .map(|&eigenvalue| {
                 let tensor = self - eigenvalue * Tensor::identity();
@@ -157,8 +211,17 @@ impl Eigenvectors for Tensor {
                     Vector2::new(1.0, 1.0)
                 }
             })
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap()
+            .collect();
+        if eigenvalues[0] > 0.0 {
+            Eigenvectors {
+                major: vectors[0],
+                minor: vectors[1],
+            }
+        } else {
+            Eigenvectors {
+                major: vectors[1],
+                minor: vectors[0],
+            }
+        }
     }
 }
