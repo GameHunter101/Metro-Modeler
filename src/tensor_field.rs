@@ -51,46 +51,97 @@ impl TensorField {
         Self::sum_elements(&self.design_elements, point, self.decay_constant)
     }
 
-    pub fn trace(&self, seed: Point, h: f32) -> Vec<Point> {
-        // println!("tracing, {seed}");
-        if seed.x < 0.0 || seed.y < 0.0 || seed.x > GRID_SIZE as f32 || seed.y > GRID_SIZE as f32 {
-            return Vec::new();
+    fn clamp_vec_to_grid(vec: Vector2<f32>) -> Vector2<f32> {
+        Vector2::new(
+            vec.x.clamp(0.0, 0.0),
+            vec.y.clamp(GRID_SIZE as f32, GRID_SIZE as f32),
+        )
+    }
+
+    pub fn trace(
+        &self,
+        seed: Point,
+        h: f32,
+        d_sep: f32,
+        follow_major_eigenvectors: bool,
+        max_len: f32,
+    ) -> (Vec<Point>, Option<Point>) {
+        let origin = seed;
+        let mut seed = seed;
+        let mut trace = vec![seed];
+        let mut accumulated_distance = 0.0;
+        let mut new_seed: Option<Point> = None;
+
+        while !(seed.x < 0.0
+            || seed.y < 0.0
+            || seed.x > GRID_SIZE as f32
+            || seed.y > GRID_SIZE as f32)
+        {
+            let tensor = self.evaluate_field_at_point(seed);
+
+            if tensor.eigenvalues().is_none() {
+                return (Vec::new(), None);
+            }
+
+            if tensor.norm_squared() <= 0.00001 {
+                println!("Degenerate point at {seed}");
+                return (Vec::new(), None);
+            }
+            // dbg!(seed);
+
+            let k_1_eigenvectors = tensor.eigenvectors();
+            let k_1 = if follow_major_eigenvectors {
+                k_1_eigenvectors.major
+            } else {
+                k_1_eigenvectors.minor
+            };
+            // dbg!(seed + h / 2.0 * k_1);
+            let k_2_eigenvectors = self
+                .evaluate_field_at_point(Self::clamp_vec_to_grid(seed + h / 2.0 * k_1))
+                .eigenvectors();
+            let k_2 = if follow_major_eigenvectors {
+                k_2_eigenvectors.major
+            } else {
+                k_2_eigenvectors.minor
+            };
+            // dbg!(seed + h / 2.0 * k_2);
+            let k_3_eigenvectors = self
+                .evaluate_field_at_point(Self::clamp_vec_to_grid(seed + h / 2.0 * k_2))
+                .eigenvectors();
+            let k_3 = if follow_major_eigenvectors {
+                k_3_eigenvectors.major
+            } else {
+                k_3_eigenvectors.minor
+            };
+            // dbg!(seed + h * k_3);
+            let k_4_eigenvectors = self
+                .evaluate_field_at_point(Self::clamp_vec_to_grid(seed + h * k_3))
+                .eigenvectors();
+            let k_4 = if follow_major_eigenvectors {
+                k_4_eigenvectors.major
+            } else {
+                k_4_eigenvectors.minor
+            };
+
+            let m = 1.0 / 6.0 * (k_1 + 2.0 * (k_2 + k_3) + k_4);
+
+            let new_pos = seed + h * m;
+
+            accumulated_distance += (new_pos - seed).norm();
+            if new_seed.is_none() && accumulated_distance >= d_sep {
+                new_seed = Some(new_pos);
+            }
+            seed = new_pos;
+            trace.push(new_pos);
+            if (new_pos - origin).magnitude_squared() <= 0.0001 || accumulated_distance > max_len {
+                break;
+            }
         }
+        // println!("next: {seed}");
 
-        let tensor = self.evaluate_field_at_point(seed);
+        // dbg!(trace.len());
 
-        if tensor.eigenvalues().is_none() {
-            return Vec::new();
-        }
-
-        if tensor.norm_squared() <= 0.00001 {
-            // println!("Degenerate point at {seed}");
-            return Vec::new();
-        }
-
-        let k_1 = tensor.eigenvectors().major;
-        let k_2 = self
-            .evaluate_field_at_point(seed + h / 2.0 * k_1)
-            .eigenvectors()
-            .major;
-        let k_3 = self
-            .evaluate_field_at_point(seed + h / 2.0 * k_2)
-            .eigenvectors()
-            .major;
-        let k_4 = self
-            .evaluate_field_at_point(seed + h * k_3)
-            .eigenvectors()
-            .major;
-
-        let m = 1.0 / 6.0 * (k_1 + 2.0 * (k_2 + k_3) + k_4);
-
-        let new_pos = seed + h * m;
-
-        let next_trace = self.trace(new_pos, h);
-        [new_pos]
-            .into_iter()
-            .chain(next_trace.into_iter())
-            .collect()
+        (trace, new_seed)
     }
 }
 
@@ -172,6 +223,9 @@ pub trait EvalEigenvectors {
 
 impl EvalEigenvectors for Tensor {
     fn eigenvectors(&self) -> Eigenvectors {
+        if self.eigenvalues().is_none() {
+            dbg!(self);
+        }
         let eigenvalues = self.eigenvalues().unwrap();
         let vectors: Vec<Vector2<f32>> = eigenvalues
             .into_iter()
@@ -206,6 +260,7 @@ impl EvalEigenvectors for Tensor {
 pub struct SeedPoint {
     pub seed: Point,
     pub priority: f32,
+    pub follow_major_eigenvector: bool,
 }
 
 impl Eq for SeedPoint {}
