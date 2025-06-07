@@ -1,6 +1,6 @@
 use nalgebra::{Matrix2, Vector2};
 
-pub const GRID_SIZE: usize = 512;
+pub const GRID_SIZE: u32 = 512;
 
 type Tensor = Matrix2<f32>;
 type Point = Vector2<f32>;
@@ -80,50 +80,31 @@ impl TensorField {
             let tensor = self.evaluate_field_at_point(seed);
 
             if tensor.eigenvalues().is_none() {
-                return (Vec::new(), None);
+                break;
             }
 
             if tensor.norm_squared() <= 0.00001 {
                 println!("Degenerate point at {seed}");
-                return (Vec::new(), None);
+                break;
             }
             // dbg!(seed);
 
             let k_1_eigenvectors = tensor.eigenvectors();
-            let k_1 = if follow_major_eigenvectors {
-                k_1_eigenvectors.major
-            } else {
-                k_1_eigenvectors.minor
-            };
-            // dbg!(seed + h / 2.0 * k_1);
+            let k_1 = k_1_eigenvectors.major.normalize();
             let k_2_eigenvectors = self
                 .evaluate_field_at_point(Self::clamp_vec_to_grid(seed + h / 2.0 * k_1))
                 .eigenvectors();
-            let k_2 = if follow_major_eigenvectors {
-                k_2_eigenvectors.major
-            } else {
-                k_2_eigenvectors.minor
-            };
-            // dbg!(seed + h / 2.0 * k_2);
+            let k_2 = k_2_eigenvectors.major.normalize();
             let k_3_eigenvectors = self
                 .evaluate_field_at_point(Self::clamp_vec_to_grid(seed + h / 2.0 * k_2))
                 .eigenvectors();
-            let k_3 = if follow_major_eigenvectors {
-                k_3_eigenvectors.major
-            } else {
-                k_3_eigenvectors.minor
-            };
-            // dbg!(seed + h * k_3);
+            let k_3 = k_3_eigenvectors.major.normalize();
             let k_4_eigenvectors = self
                 .evaluate_field_at_point(Self::clamp_vec_to_grid(seed + h * k_3))
                 .eigenvectors();
-            let k_4 = if follow_major_eigenvectors {
-                k_4_eigenvectors.major
-            } else {
-                k_4_eigenvectors.minor
-            };
+            let k_4 = k_4_eigenvectors.major.normalize();
 
-            let m = 1.0 / 6.0 * (k_1 + 2.0 * (k_2 + k_3) + k_4);
+            let m = 1.0 / 6.0 * k_1 + 1.0 / 3.0 * k_2 + 1.0 / 3.0 * k_3 + 1.0 / 6.0 * k_4;
 
             let new_pos = seed + h * m;
 

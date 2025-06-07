@@ -1,12 +1,13 @@
 use core::f32;
 use std::collections::BinaryHeap;
 
-use image::ImageBuffer;
+use image::{EncodableLayout, ImageBuffer};
 use nalgebra::Vector2;
 use rand::Rng;
-use tensor_field::{DesignElement, GRID_SIZE, SeedPoint, TensorField};
+use tensor_field::{DesignElement, EvalEigenvectors, GRID_SIZE, SeedPoint, TensorField};
 use v4::{
     builtin_components::mesh_component::{MeshComponent, VertexDescriptor},
+    engine_support::texture_support::Texture,
     scene,
 };
 use wgpu::vertex_attr_array;
@@ -40,7 +41,7 @@ async fn main() {
 
     let tensor_field = TensorField::new(
         vec![grid_element, radial_element, grid_element_2, grid_element_3],
-        0.0001,
+        0.0004,
     );
 
     let degenerate_points: Vec<Vector2<f32>> = (0..GRID_SIZE)
@@ -63,7 +64,7 @@ async fn main() {
 
     let city_center = Vector2::new(150.0_f32, 240.0);
 
-    let mut rng = rand::rng();
+    /* let mut rng = rand::rng();
     let mut seed_points: BinaryHeap<SeedPoint> = (0..100)
         .flat_map(|_| {
             let point = Vector2::new(
@@ -80,7 +81,7 @@ async fn main() {
                 .map(|p| (p - point).norm_squared())
                 .fold(f32::MAX, |acc, e| if e < acc { e } else { acc });
 
-            if closest_degen <= 0.00001 {
+            if closest_degen <= 5.0 {
                 None
             } else {
                 Some(SeedPoint {
@@ -103,9 +104,9 @@ async fn main() {
     }) = seed_points.pop()
     {
         count += 1;
-        let mut trace_res = tensor_field.trace(seed, 3.0, 50.0, follow_major_eigenvector, 200.0);
-        // dbg!(trace_res.0.len());
-        trace.append(&mut trace_res.0);
+        let trace_res = tensor_field.trace(seed, 3.0, 50.0, follow_major_eigenvector, 200.0);
+        dbg!(trace_res.0.len());
+        trace.push(trace_res.0);
         seed_points.push(SeedPoint {
             seed: trace_res.1.unwrap_or_default(),
             priority: f32::MAX,
@@ -114,60 +115,52 @@ async fn main() {
 
         // dbg!(count);
 
-        if count == 200 {
+        if count == 500 {
             break;
         }
     }
 
-    // dbg!(trace.len());
-    /* let trace = tensor_field
-    .trace(seed_points.pop().unwrap().seed, 3.0, 50.0, true)
-    .0; */
-    dbg!(trace.len());
-
-    // dbg!(&trace[0..(40).min(trace.len())]);
-
     let mut image = ImageBuffer::new(GRID_SIZE as u32, GRID_SIZE as u32);
-    for pos in &trace {
+    for pos in trace.iter().flatten() {
         if pos.x < GRID_SIZE as f32 && pos.y < GRID_SIZE as f32 {
             *image.get_pixel_mut(pos.x as u32, pos.y as u32) = image::Rgb([255_u8, 0, 0]);
         }
     }
-    /* image.enumerate_pixels_mut().for_each(|(x, y, pixel)| {
-        // let vector = Vector2::new(x as f32, y as f32);
-        if trace.contains(&Vector2::new(x as f32, y as f32)) {
-            *pixel = image::Rgb([255_u8, 0, 0]);
-        }
-        /* let dist = trace.iter().fold(f32::MAX, |acc, point| {
-            let dist = (point - vector).norm_squared();
-            if dist < acc { dist } else { acc }
-        }); */
 
-        /* if dist < 8.0 {
-            *pixel = image::Rgb([255_u8, 0, 0])
-        } else {
-            *pixel = image::Rgb([0, 0, 0])
-        } */
-    }); */
-
-    image.save("test.png").unwrap();
-
-    /* let trace = vec![
-        Vector2::new(0.0, 0.0),
-        Vector2::new(0.0, GRID_SIZE as f32),
-        Vector2::new(GRID_SIZE as f32, 0.0),
-        Vector2::new(GRID_SIZE as f32, GRID_SIZE as f32),
-    ]; */
+    image.save("test.png").unwrap(); */
 
     let mut engine = v4::V4::builder()
-        .features(wgpu::Features::POLYGON_MODE_POINT)
+        .features(wgpu::Features::POLYGON_MODE_LINE)
         .window_settings(GRID_SIZE as u32, GRID_SIZE as u32, "Visualizer", None)
         .build()
         .await;
 
+    let sample_factor = 10;
+
+    let trace = tensor_field
+        .trace(Vector2::new(295.0, 440.0), 1.0, 20.0, true, 200.0)
+        .0;
+
+    let mut norm_tex = ImageBuffer::new(GRID_SIZE, GRID_SIZE);
+
+    for (x, y, pix) in norm_tex.enumerate_pixels_mut() {
+        let val = (tensor_field
+            .evaluate_field_at_point(Vector2::new(x as f32, y as f32))
+            .norm() > 0.01) as u8 * 255;
+        *pix = image::Rgba([val, val, val, 100]);
+    }
+
+    norm_tex.save("test.png").unwrap();
+
+    let rendering_manager = engine.rendering_manager();
+    let device = rendering_manager.device();
+    let queue = rendering_manager.queue();
+
+    // dbg!(trace.len());
+
     scene! {
         scene: visualizer,
-        _ = {
+        "eigenvectors" = {
             material: {
                 pipeline: {
                     vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
@@ -175,21 +168,104 @@ async fn main() {
                     vertex_layouts: [Vertex::vertex_layout()],
                     uses_camera: false,
                     geometry_details: {
-                        topology: wgpu::PrimitiveTopology::PointList,
-                        polygon_mode: wgpu::PolygonMode::Point,
+                        topology: wgpu::PrimitiveTopology::LineList,
+                        polygon_mode: wgpu::PolygonMode::Line,
+                    },
+                },
+            },
+            components: [
+                MeshComponent(
+                    vertices: vec![
+                        (0..GRID_SIZE / sample_factor).flat_map(|x| (0..GRID_SIZE / sample_factor).flat_map(|y| {
+                            let point = Vector2::new(x as f32 * sample_factor as f32, y as f32 * sample_factor as f32);
+                            let tensor = tensor_field.evaluate_field_at_point(point);
+                            let eigenvectors = tensor.eigenvectors();
+                            let maj = eigenvectors.major.normalize() * (sample_factor - 1) as f32;
+                            let min = eigenvectors.minor.normalize() * (sample_factor - 1) as f32;
+                            let maj_point = normalize_vector(point + maj);
+                            let min_point = normalize_vector(point + min);
+                            let norm_point = normalize_vector(point);
+                            [
+                                Vertex {pos: [norm_point.x, norm_point.y, 0.0], col: [1.0, 0.0, 0.0, 0.8]}, Vertex {pos: [maj_point.x, maj_point.y, 0.0], col: [1.0, 0.0, 0.0, 0.8]},
+                                Vertex {pos: [norm_point.x, norm_point.y, 0.0], col: [0.0, 1.0, 0.0, 0.8]}, Vertex {pos: [min_point.x, min_point.y, 0.0], col: [0.0, 1.0, 0.0, 0.8]}
+                            ]
+                        }).collect::<Vec<_>>()).collect()
+                    ],
+                    enabled_models: vec![(0, None)]
+                ),
+            ]
+        },
+        "degenerate_points" = {
+            material: {
+                pipeline: {
+                    vertex_shader_path: "./shaders/degenerate_point_vert.wgsl",
+                    fragment_shader_path: "./shaders/degenerate_point_frag.wgsl",
+                    vertex_layouts: [TexVertex::vertex_layout()],
+                    uses_camera: false,
+                },
+                attachments: [
+                    Texture(
+                    texture: v4::ecs::material::GeneralTexture::Regular(
+                        Texture::from_bytes(
+                            norm_tex.as_bytes(),
+                            (GRID_SIZE,
+                            GRID_SIZE),
+                            device,
+                            queue,
+                            wgpu::TextureFormat::Rgba8Unorm,
+                            false,
+                            true,
+                        )
+                    ),
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                )],
+            },
+            components: [
+                MeshComponent(
+                    vertices: vec![vec![
+                        TexVertex {
+                            pos: [-1.0, 3.0, 0.1],
+                            tex_coords: [0.0, -1.0]
+                        },
+                        TexVertex {
+                            pos: [-1.0, -1.0, 0.1],
+                            tex_coords: [0.0, 1.0]
+                        },
+                        TexVertex {
+                            pos: [3.0, -1.0, 0.1],
+                            tex_coords: [2.0, 1.0]
+                        },
+                    ]],
+                    enabled_models: vec![(0, None)]
+                )
+            ]
+        },
+        "path" = {
+            material: {
+                pipeline: {
+                    vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
+                    fragment_shader_path: "./shaders/visualizer_fragment.wgsl",
+                    vertex_layouts: [Vertex::vertex_layout()],
+                    uses_camera: false,
+                    geometry_details: {
+                        topology: wgpu::PrimitiveTopology::LineStrip,
+                        polygon_mode: wgpu::PolygonMode::Line,
                     }
                 }
             },
             components: [
                 MeshComponent(
                     vertices: vec![
-                        trace.into_iter().map(|vec| Vertex {
-                            pos: [
-                                2.0 * vec.x / GRID_SIZE as f32 - 1.0,
-                                -(2.0 * vec.y / GRID_SIZE as f32 - 1.0),
-                                0.0
-                            ]
-                        }).collect()
+                        trace.iter().map(|vec| {
+                                Vertex {
+                                    pos: [
+                                        2.0 * vec.x / GRID_SIZE as f32 - 1.0,
+                                        -(2.0 * vec.y / GRID_SIZE as f32 - 1.0),
+                                        0.0,
+                                    ],
+                                    col: [0.0, 0.0, 1.0, 1.0]
+                                }
+                        }).collect::<Vec<_>>()
                     ],
                     enabled_models: vec![(0, None)]
                 )
@@ -202,18 +278,47 @@ async fn main() {
     engine.main_loop().await;
 }
 
+fn normalize_vector(vec: Vector2<f32>) -> Vector2<f32> {
+    Vector2::new(
+        2.0 * vec.x / GRID_SIZE as f32 - 1.0,
+        -(2.0 * vec.y / GRID_SIZE as f32 - 1.0),
+    )
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
     pos: [f32; 3],
+    col: [f32; 4],
 }
 
 impl VertexDescriptor for Vertex {
-    const ATTRIBUTES: &[wgpu::VertexAttribute] = &vertex_attr_array![0 => Float32x3];
+    const ATTRIBUTES: &[wgpu::VertexAttribute] =
+        &vertex_attr_array![0 => Float32x3, 1 => Float32x4];
 
     fn from_pos_normal_coords(pos: Vec<f32>, _normal: Vec<f32>, _tex_coords: Vec<f32>) -> Self {
         Self {
             pos: pos.try_into().unwrap(),
+            col: [1.0; 4],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct TexVertex {
+    pos: [f32; 3],
+    tex_coords: [f32; 2],
+}
+
+impl VertexDescriptor for TexVertex {
+    const ATTRIBUTES: &[wgpu::VertexAttribute] =
+        &vertex_attr_array![0 => Float32x3, 1 => Float32x2];
+
+    fn from_pos_normal_coords(pos: Vec<f32>, _normal: Vec<f32>, tex_coords: Vec<f32>) -> Self {
+        Self {
+            pos: pos.try_into().unwrap(),
+            tex_coords: tex_coords.try_into().unwrap(),
         }
     }
 }
