@@ -2,8 +2,8 @@ use nalgebra::{Matrix2, Vector2};
 
 pub const GRID_SIZE: u32 = 512;
 
-type Tensor = Matrix2<f32>;
-type Point = Vector2<f32>;
+pub type Tensor = Matrix2<f32>;
+pub type Point = Vector2<f32>;
 
 #[derive(Debug)]
 pub struct TensorField {
@@ -52,9 +52,12 @@ impl TensorField {
     }
 
     fn clamp_vec_to_grid(vec: Vector2<f32>) -> Vector2<f32> {
+        let clamped_x = 
+            vec.x.clamp(0.0, GRID_SIZE as f32);
+        let clamped_y = vec.y.clamp(0.0, GRID_SIZE as f32);
         Vector2::new(
-            vec.x.clamp(0.0, 0.0),
-            vec.y.clamp(GRID_SIZE as f32, GRID_SIZE as f32),
+            if clamped_x.is_nan() {1.0} else {clamped_x},
+            if clamped_y.is_nan() {1.0} else {clamped_y},
         )
     }
 
@@ -84,27 +87,53 @@ impl TensorField {
             }
 
             if tensor.norm_squared() <= 0.00001 {
-                println!("Degenerate point at {seed}");
+                // println!("Degenerate point at {seed}");
                 break;
             }
             // dbg!(seed);
 
+            // println!("1: {:?}", seed);
             let k_1_eigenvectors = tensor.eigenvectors();
-            let k_1 = k_1_eigenvectors.major.normalize();
+            let k_1 = if follow_major_eigenvectors {
+                k_1_eigenvectors.major
+            } else {
+                k_1_eigenvectors.minor
+            }
+            .normalize();
+            // println!("2: {:?} | {:?} | {:?}", Self::clamp_vec_to_grid(seed + h / 2.0 * k_1), k_1, k_1_eigenvectors.minor);
             let k_2_eigenvectors = self
                 .evaluate_field_at_point(Self::clamp_vec_to_grid(seed + h / 2.0 * k_1))
                 .eigenvectors();
-            let k_2 = k_2_eigenvectors.major.normalize();
+            let k_2 = if follow_major_eigenvectors {
+                k_2_eigenvectors.major
+            } else {
+                k_2_eigenvectors.minor
+            }
+            .normalize();
+            // println!("3: {:?} | {:?} | {:?}", Self::clamp_vec_to_grid(seed + h / 2.0 * k_2), k_2, k_2_eigenvectors.minor);
             let k_3_eigenvectors = self
                 .evaluate_field_at_point(Self::clamp_vec_to_grid(seed + h / 2.0 * k_2))
                 .eigenvectors();
-            let k_3 = k_3_eigenvectors.major.normalize();
+            let k_3 = if follow_major_eigenvectors {
+                k_3_eigenvectors.major
+            } else {
+                k_3_eigenvectors.minor
+            }
+            .normalize();
+            // println!("4: {:?} | {:?} | {:?}", Self::clamp_vec_to_grid(seed + h * k_3), k_3, k_3_eigenvectors.minor);
             let k_4_eigenvectors = self
                 .evaluate_field_at_point(Self::clamp_vec_to_grid(seed + h * k_3))
                 .eigenvectors();
-            let k_4 = k_4_eigenvectors.major.normalize();
+            let k_4 = if follow_major_eigenvectors {
+                k_4_eigenvectors.major
+            } else {
+                k_4_eigenvectors.minor
+            }
+            .normalize();
 
             let m = 1.0 / 6.0 * k_1 + 1.0 / 3.0 * k_2 + 1.0 / 3.0 * k_3 + 1.0 / 6.0 * k_4;
+
+            // println!("k_1: {k_1:?}, k_2: {k_2:?}, k_3: {k_3:?}, k_4: {k_4:?}, m: {m:?}");
 
             let new_pos = seed + h * m;
 
@@ -151,7 +180,7 @@ impl DesignElement {
             }
             DesignElement::Radial { center } => {
                 let x = point.x - center.x;
-                let y = point.x - center.x;
+                let y = point.y - center.y;
 
                 let y_squared = y * y;
                 let x_squared = x * x;
@@ -234,20 +263,5 @@ impl EvalEigenvectors for Tensor {
                 minor: vectors[0],
             }
         }
-    }
-}
-
-#[derive(PartialEq, PartialOrd)]
-pub struct SeedPoint {
-    pub seed: Point,
-    pub priority: f32,
-    pub follow_major_eigenvector: bool,
-}
-
-impl Eq for SeedPoint {}
-
-impl Ord for SeedPoint {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.priority.total_cmp(&other.priority).reverse()
     }
 }
