@@ -205,7 +205,7 @@ pub fn trace_street_plan(
             tensor_field,
             seed,
             0.2,
-            50.0,
+            20.0, // + 0.7 * (seed - city_center).norm(),
             follow_major_eigenvector,
             200.0,
             horizontal_sector_count,
@@ -219,6 +219,16 @@ pub fn trace_street_plan(
                 &major_line_traces
             } else {
                 &minor_line_traces
+            },
+            if follow_major_eigenvector {
+                &minor_line_sectors
+            } else {
+                &major_line_sectors
+            },
+            if follow_major_eigenvector {
+                &minor_line_traces
+            } else {
+                &major_line_traces
             },
             false,
         );
@@ -266,7 +276,9 @@ pub fn trace(
     horizontal_sector_count: u32,
     vertical_sector_count: u32,
     sector_map: &HashMap<(u32, u32), Vec<usize>>,
-    all_traces: &Vec<Vec<Point>>,
+    all_traces: &[Vec<Point>],
+    opposite_family_sector_map: &HashMap<(u32, u32), Vec<usize>>,
+    opposite_family_traces: &[Vec<Point>],
     reverse: bool,
 ) -> (Vec<Point>, Vec<Point>, HashSet<(u32, u32)>) {
     let origin = seed;
@@ -369,7 +381,9 @@ pub fn trace(
             sector_map,
             all_traces,
             d_sep,
-        ) {
+        )
+        .is_some()
+        {
             if new_seeds.is_empty() && (new_pos - origin).norm_squared() > 5.0 {
                 new_seeds.push(new_pos);
             }
@@ -385,6 +399,8 @@ pub fn trace(
                     vertical_sector_count,
                     sector_map,
                     all_traces,
+                    opposite_family_sector_map,
+                    opposite_family_traces,
                     true,
                 );
 
@@ -397,6 +413,27 @@ pub fn trace(
             break;
         }
         prev_direction = m;
+    }
+
+    if !reverse {
+        if let Some(closest_point) = point_is_too_close_to_others(
+            seed,
+            horizontal_sector_count,
+            vertical_sector_count,
+            &opposite_family_sector_map
+                .iter()
+                .chain(sector_map.iter())
+                .map(|(a, b)| (a.clone(), b.clone()))
+                .collect(),
+            &opposite_family_traces
+                .into_iter()
+                .chain(all_traces.into_iter())
+                .cloned()
+                .collect::<Vec<_>>(),
+            d_sep / 2.0,
+        ) {
+            trace_res.push(closest_point);
+        }
     }
 
     (trace_res, new_seeds, sectors)
@@ -416,9 +453,9 @@ fn point_is_too_close_to_others(
     horiztonal_sector_count: u32,
     vertical_sector_count: u32,
     sector_map: &HashMap<(u32, u32), Vec<usize>>,
-    all_traces: &Vec<Vec<Point>>,
+    all_traces: &[Vec<Point>],
     d_sep: f32,
-) -> bool {
+) -> Option<Point> {
     let horizontal_sector_size = GRID_SIZE / horiztonal_sector_count;
     let vertical_sector_size = GRID_SIZE / vertical_sector_count;
     let mut sorted_sectors: Vec<(u32, u32)> = (0..horiztonal_sector_count)
@@ -449,40 +486,62 @@ fn point_is_too_close_to_others(
     });
 
     for sector in sorted_sectors {
-        if point_is_too_close_to_others_in_sector(point, &sector, sector_map, all_traces, d_sep) {
-            return true;
+        if let Some(closest_point) =
+            point_is_too_close_to_others_in_sector(point, &sector, sector_map, all_traces, d_sep)
+        {
+            return Some(closest_point);
         }
     }
 
-    return false;
+    return None;
 }
 
 fn point_is_too_close_to_others_in_sector(
     point: Point,
     sector: &(u32, u32),
     sector_map: &HashMap<(u32, u32), Vec<usize>>,
-    all_traces: &Vec<Vec<Point>>,
+    all_traces: &[Vec<Point>],
     d_sep: f32,
-) -> bool {
-    let temp: Vec<bool> = sector_map[sector]
+) -> Option<Point> {
+    let d_sep_squared = d_sep * d_sep;
+    let mut temp: Vec<Point> = sector_map[sector]
         .iter()
-        .map(|trace_index| {
+        .flat_map(|trace_index| {
             let trace = &all_traces[*trace_index];
-            let d_sep_squared = d_sep * d_sep;
-            if (point - trace.first().unwrap()).norm_squared() <= d_sep_squared
-                || (point - trace.last().unwrap()).norm_squared() <= d_sep_squared
-                || (point - trace[trace.len() / 2]).norm_squared() <= d_sep_squared
-            {
-                return true;
+            let eval_points = [
+                trace.first().unwrap(),
+                trace.last().unwrap(),
+                &trace[trace.len() / 2],
+            ];
+
+            let min_dist_point = eval_points.into_iter().map(|p| p - point).fold(
+                Point::new(f32::MAX, f32::MAX),
+                |acc, e| {
+                    if e.norm_squared() < acc.norm_squared() {
+                        e
+                    } else {
+                        acc
+                    }
+                },
+            );
+
+            if min_dist_point.norm_squared() <= d_sep_squared {
+                return Some(min_dist_point + point);
             }
             /* for node in &all_traces[*trace_index] {
                 if (node - point).norm_squared() <= d_sep * d_sep {
                     return true;
                 }
             } */
-            return false;
+            return None;
         })
         .collect();
 
-    temp.contains(&true)
+    temp.sort_by(|a, b| {
+        (a - point)
+            .norm_squared()
+            .total_cmp(&(b - point).norm_squared())
+    });
+
+    temp.first().cloned()
 }
