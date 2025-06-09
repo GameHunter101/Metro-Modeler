@@ -2,7 +2,7 @@ use core::f32;
 
 use image::{EncodableLayout, ImageBuffer};
 use nalgebra::Vector2;
-use street_plan::{SeedPoint, distribute_points, prioritize_points};
+use street_plan::trace_street_plan;
 use tensor_field::{DesignElement, EvalEigenvectors, GRID_SIZE, TensorField};
 use v4::{
     builtin_components::mesh_component::{MeshComponent, VertexDescriptor},
@@ -46,36 +46,16 @@ async fn main() {
         0.0004,
     );
 
-    let mut seed_points = prioritize_points(&distribute_points(30), city_center, &tensor_field);
-
-    let mut trace = Vec::new();
-
-    let mut count = 0;
-    while let Some(SeedPoint {
-        seed,
-        follow_major_eigenvector,
-        ..
-    }) = seed_points.pop()
-    {
-        count += 1;
-        let trace_res = tensor_field.trace(seed, 1.0, 50.0, follow_major_eigenvector, 200.0);
-        trace.push(trace_res.0);
-        if let Some(new_seed) = trace_res.1 {
-            seed_points.push(SeedPoint {
-                seed: new_seed,
-                priority: f32::MAX,
-                follow_major_eigenvector: !follow_major_eigenvector,
-            });
-        }
-
-        if count == 200 {
-            break;
-        }
-    }
+    let trace = trace_street_plan(&tensor_field, 30, city_center, 16, 16);
 
     let mut engine = v4::V4::builder()
         .features(wgpu::Features::POLYGON_MODE_LINE)
-        .window_settings(GRID_SIZE as u32, GRID_SIZE as u32, "Visualizer", None)
+        .window_settings(
+            GRID_SIZE as u32 * 2,
+            GRID_SIZE as u32 * 2,
+            "Visualizer",
+            None,
+        )
         .build()
         .await;
 

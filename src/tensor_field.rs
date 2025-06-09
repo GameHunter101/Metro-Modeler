@@ -9,7 +9,6 @@ pub type Point = Vector2<f32>;
 pub struct TensorField {
     design_elements: Vec<DesignElement>,
     decay_constant: f32,
-    // pub field: Option<[[Tensor; GRID_SIZE]; GRID_SIZE]>,
 }
 
 impl TensorField {
@@ -17,7 +16,6 @@ impl TensorField {
         TensorField {
             design_elements,
             decay_constant,
-            // field: None,
         }
     }
 
@@ -51,107 +49,32 @@ impl TensorField {
         Self::sum_elements(&self.design_elements, point, self.decay_constant)
     }
 
-    fn clamp_vec_to_grid(vec: Vector2<f32>) -> Vector2<f32> {
-        let clamped_x = 
-            vec.x.clamp(0.0, GRID_SIZE as f32);
-        let clamped_y = vec.y.clamp(0.0, GRID_SIZE as f32);
-        Vector2::new(
-            if clamped_x.is_nan() {1.0} else {clamped_x},
-            if clamped_y.is_nan() {1.0} else {clamped_y},
-        )
-    }
-
-    pub fn trace(
-        &self,
-        seed: Point,
-        h: f32,
-        d_sep: f32,
-        follow_major_eigenvectors: bool,
-        max_len: f32,
-    ) -> (Vec<Point>, Option<Point>) {
-        let origin = seed;
-        let mut seed = seed;
-        let mut trace = vec![seed];
-        let mut accumulated_distance = 0.0;
-        let mut new_seed: Option<Point> = None;
-
-        while !(seed.x < 0.0
-            || seed.y < 0.0
-            || seed.x > GRID_SIZE as f32
-            || seed.y > GRID_SIZE as f32)
-        {
-            let tensor = self.evaluate_field_at_point(seed);
-
-            if tensor.eigenvalues().is_none() {
-                break;
-            }
-
-            if tensor.norm_squared() <= 0.00001 {
-                // println!("Degenerate point at {seed}");
-                break;
-            }
-            // dbg!(seed);
-
-            // println!("1: {:?}", seed);
-            let k_1_eigenvectors = tensor.eigenvectors();
-            let k_1 = if follow_major_eigenvectors {
-                k_1_eigenvectors.major
-            } else {
-                k_1_eigenvectors.minor
-            }
-            .normalize();
-            // println!("2: {:?} | {:?} | {:?}", Self::clamp_vec_to_grid(seed + h / 2.0 * k_1), k_1, k_1_eigenvectors.minor);
-            let k_2_eigenvectors = self
-                .evaluate_field_at_point(Self::clamp_vec_to_grid(seed + h / 2.0 * k_1))
-                .eigenvectors();
-            let k_2 = if follow_major_eigenvectors {
-                k_2_eigenvectors.major
-            } else {
-                k_2_eigenvectors.minor
-            }
-            .normalize();
-            // println!("3: {:?} | {:?} | {:?}", Self::clamp_vec_to_grid(seed + h / 2.0 * k_2), k_2, k_2_eigenvectors.minor);
-            let k_3_eigenvectors = self
-                .evaluate_field_at_point(Self::clamp_vec_to_grid(seed + h / 2.0 * k_2))
-                .eigenvectors();
-            let k_3 = if follow_major_eigenvectors {
-                k_3_eigenvectors.major
-            } else {
-                k_3_eigenvectors.minor
-            }
-            .normalize();
-            // println!("4: {:?} | {:?} | {:?}", Self::clamp_vec_to_grid(seed + h * k_3), k_3, k_3_eigenvectors.minor);
-            let k_4_eigenvectors = self
-                .evaluate_field_at_point(Self::clamp_vec_to_grid(seed + h * k_3))
-                .eigenvectors();
-            let k_4 = if follow_major_eigenvectors {
-                k_4_eigenvectors.major
-            } else {
-                k_4_eigenvectors.minor
-            }
-            .normalize();
-
-            let m = 1.0 / 6.0 * k_1 + 1.0 / 3.0 * k_2 + 1.0 / 3.0 * k_3 + 1.0 / 6.0 * k_4;
-
-            // println!("k_1: {k_1:?}, k_2: {k_2:?}, k_3: {k_3:?}, k_4: {k_4:?}, m: {m:?}");
-
-            let new_pos = seed + h * m;
-
-            accumulated_distance += (new_pos - seed).norm();
-            if new_seed.is_none() && accumulated_distance >= d_sep {
-                new_seed = Some(new_pos);
-            }
-            seed = new_pos;
-            trace.push(new_pos);
-            if (new_pos - origin).magnitude_squared() <= 0.0001 || accumulated_distance > max_len {
-                break;
-            }
+    pub fn evaluate_smoothed_field_at_point(&self, point: Point) -> Tensor {
+        let mut sum = self.evaluate_field_at_point(point);
+        let mut count = 1;
+        let mut neighbors = Vec::new();
+        if point.x >= 1.0 {
+            neighbors.push(Point::new(-1.0, 0.0));
+            count += 1;
+        } else if point.x <= GRID_SIZE as f32 - 1.0 {
+            neighbors.push(Point::new(1.0, 0.0));
+            count += 1;
         }
-        // println!("next: {seed}");
 
-        // dbg!(trace.len());
+        if point.y >= 1.0 {
+            neighbors.push(Point::new(0.0, -1.0));
+            count += 1;
+        } else if point.y <= GRID_SIZE as f32 - 1.0 {
+            neighbors.push(Point::new(0.0, 1.0));
+            count += 1;
+        }
 
-        (trace, new_seed)
+        sum += neighbors
+            .into_iter()
+            .map(|vec| self.evaluate_field_at_point(point + vec))
+            .sum::<Tensor>();
+
+        sum / count as f32
     }
 }
 
