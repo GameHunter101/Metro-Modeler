@@ -1,10 +1,16 @@
 use core::f32;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::{
+    collections::{BinaryHeap, HashMap, HashSet},
+    ops::Range,
+};
 
 use nalgebra::Vector2;
 use rand::Rng;
 
-use crate::tensor_field::{EvalEigenvectors, GRID_SIZE, Point, TensorField};
+use crate::{
+    aabb::BoundingBox,
+    tensor_field::{EvalEigenvectors, GRID_SIZE, Point, TensorField},
+};
 
 pub fn distribute_points(point_count: u32) -> Vec<Point> {
     let mut rand = rand::rng();
@@ -173,27 +179,53 @@ pub fn trace_street_plan(
     horizontal_sector_count: u32,
     vertical_sector_count: u32,
 ) -> Vec<Vec<Point>> {
+    let temp_points = [
+        (391.0, 113.0),
+        (10.0, 470.0),
+        (382.0, 472.0),
+        (61.0, 152.0),
+        (413.0, 291.0),
+        (191.0, 298.0),
+        (0.0, 303.0),
+        (147.0, 0.0),
+        (304.0, 294.0),
+        (298.0, 41.0),
+        (230.0, 509.0),
+        (502.0, 416.0),
+        (127.0, 205.0),
+        (285.0, 162.0),
+        (459.0, 40.0),
+        (299.0, 436.0),
+        (121.0, 472.0),
+        (508.0, 493.0),
+        (470.0, 151.0),
+        (214.0, 413.0),
+        (364.0, 355.0),
+        (171.0, 63.0),
+        (355.0, 191.0),
+        (274.0, 355.0),
+        (66.0, 336.0),
+        (230.0, 65.0),
+        (30.0, 31.0),
+        (223.0, 12.0),
+        (193.0, 146.0),
+        (447.0, 224.0),
+    ]
+    .map(|p| Point::new(p.0, p.1));
     let mut seed_points = prioritize_points(
-        &distribute_points(starting_seed_count),
+        &temp_points,
+        // &distribute_points(starting_seed_count),
         city_center,
         &tensor_field,
     );
 
     let mut major_line_traces = Vec::new();
-    let mut major_line_sectors: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
-    (0..horizontal_sector_count).for_each(|x| {
-        (0..vertical_sector_count).for_each(|y| {
-            major_line_sectors.insert((x, y), Vec::new());
-        });
-    });
+    let mut major_bounding_boxes: Vec<BoundingBox> = Vec::new();
 
     let mut minor_line_traces = Vec::new();
-    let mut minor_line_sectors: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
-    (0..horizontal_sector_count).for_each(|x| {
-        (0..vertical_sector_count).for_each(|y| {
-            minor_line_sectors.insert((x, y), Vec::new());
-        });
-    });
+    let mut minor_bounding_boxes: Vec<BoundingBox> = Vec::new();
+
+    let mut full_trace = Vec::new();
 
     while let Some(SeedPoint {
         seed,
@@ -201,56 +233,71 @@ pub fn trace_street_plan(
         ..
     }) = seed_points.pop()
     {
+        let d_sep = 20.0; // + 0.7 * (seed - city_center).norm();
         let trace_res = trace(
             tensor_field,
             seed,
             0.2,
-            20.0, // + 0.7 * (seed - city_center).norm(),
+            d_sep,
             follow_major_eigenvector,
             200.0,
             horizontal_sector_count,
             vertical_sector_count,
             if follow_major_eigenvector {
-                &major_line_sectors
+                &major_bounding_boxes
             } else {
-                &minor_line_sectors
-            },
-            if follow_major_eigenvector {
-                &major_line_traces
-            } else {
-                &minor_line_traces
-            },
-            if follow_major_eigenvector {
-                &minor_line_sectors
-            } else {
-                &major_line_sectors
-            },
-            if follow_major_eigenvector {
-                &minor_line_traces
-            } else {
-                &major_line_traces
+                &minor_bounding_boxes
             },
             false,
         );
 
+        if trace_res.0.is_empty() {
+            continue;
+        }
+
+        let trimmed_range = trim_trace(
+            &trace_res.0,
+            if follow_major_eigenvector {
+                &major_bounding_boxes
+            } else {
+                &minor_bounding_boxes
+            },
+            0,
+            trace_res.0.len() - 1,
+            d_sep,
+        );
+
+        if trimmed_range.end - trimmed_range.start < 10 {
+            continue;
+        }
+
+        let trace_path = /* smooth_path( */trace_res.0[trimmed_range].to_vec()/* , 1) */;
+
+        if !is_path_long_enough(&trace_path, d_sep) {
+            continue;
+        }
+
+        let mut bounding_box = vec![BoundingBox::new(&trace_path)];
+        let frac_1_sqrt_2 = std::f32::consts::FRAC_1_SQRT_2;
+        let bb = &bounding_box[0];
+        let rectangularness = Vector2::new(bb.east() - bb.west(), bb.north() - bb.south())
+            .normalize()
+            .dot(&Vector2::new(frac_1_sqrt_2, frac_1_sqrt_2));
+        if rectangularness > 0.5 || rectangularness < 3.0_f32.sqrt() / 2.0 {
+            bounding_box = vec![
+                BoundingBox::new(&trace_path[..trace_path.len() / 2]),
+                BoundingBox::new(&trace_path[trace_path.len() / 2..]),
+            ];
+        }
+
+        full_trace.push(trace_path.clone());
+
         if follow_major_eigenvector {
-            let index = major_line_traces.len();
-            major_line_traces.push(trace_res.0);
-            for sector_coord in trace_res.2 {
-                major_line_sectors
-                    .get_mut(&sector_coord)
-                    .unwrap()
-                    .push(index);
-            }
+            major_line_traces.push(trace_path);
+            major_bounding_boxes.extend(bounding_box);
         } else {
-            let index = minor_line_traces.len();
-            minor_line_traces.push(trace_res.0);
-            for sector_coord in trace_res.2 {
-                minor_line_sectors
-                    .get_mut(&sector_coord)
-                    .unwrap()
-                    .push(index);
-            }
+            minor_line_traces.push(trace_path);
+            minor_bounding_boxes.extend(bounding_box);
         }
         for new_seed in trace_res.1 {
             seed_points.push(SeedPoint {
@@ -261,12 +308,24 @@ pub fn trace_street_plan(
         }
     }
 
-    major_line_traces.append(&mut minor_line_traces);
-
-    major_line_traces
+    full_trace
 }
 
-pub fn trace(
+fn is_path_long_enough(path: &[Point], d_sep: f32) -> bool {
+    let mut last_point = path[0];
+    let mut dist = 0.0;
+    for point in path {
+        dist += (point - last_point).norm();
+        if dist > d_sep {
+            return true;
+        }
+        last_point = *point;
+    }
+
+    false
+}
+
+fn trace(
     tensor_field: &TensorField,
     seed: Point,
     h: f32,
@@ -275,12 +334,14 @@ pub fn trace(
     max_len: f32,
     horizontal_sector_count: u32,
     vertical_sector_count: u32,
-    sector_map: &HashMap<(u32, u32), Vec<usize>>,
-    all_traces: &[Vec<Point>],
-    opposite_family_sector_map: &HashMap<(u32, u32), Vec<usize>>,
-    opposite_family_traces: &[Vec<Point>],
+    bounding_boxes: &[BoundingBox],
     reverse: bool,
 ) -> (Vec<Point>, Vec<Point>, HashSet<(u32, u32)>) {
+    for bounding_box in bounding_boxes {
+        if bounding_box.check_point_collision_with_padding(seed, d_sep) {
+            return (Vec::new(), Vec::new(), HashSet::new());
+        }
+    }
     let origin = seed;
     let mut seed = seed;
     let mut trace_res = vec![seed];
@@ -296,6 +357,11 @@ pub fn trace(
 
     while !(seed.x < 0.0 || seed.y < 0.0 || seed.x > GRID_SIZE as f32 || seed.y > GRID_SIZE as f32)
     {
+        for bounding_box in bounding_boxes {
+            if bounding_box.check_point_collision_with_padding(seed, d_sep / 2.0) {
+                break;
+            }
+        }
         sectors.insert((
             (seed.x / horizontal_sector_size as f32) as u32,
             (seed.y / vertical_sector_size as f32) as u32,
@@ -342,6 +408,7 @@ pub fn trace(
 
         let mut m = 1.0 / 6.0 * k_1 + 1.0 / 3.0 * k_2 + 1.0 / 3.0 * k_3 + 1.0 / 6.0 * k_4;
 
+        // Trying to smooth out erratic paths
         if m.dot(&prev_direction).abs() < 0.5 {
             let x_axis = Vector2::x_axis();
             let angle_away = m.dot(&prev_direction).acos();
@@ -359,8 +426,9 @@ pub fn trace(
         let new_pos = seed + h * m;
 
         accumulated_distance += (new_pos - seed).norm();
-        if new_seeds.is_empty() && accumulated_distance >= d_sep {
+        if accumulated_distance >= d_sep {
             new_seeds.push(new_pos);
+            accumulated_distance = 0.0;
         }
         seed = new_pos;
 
@@ -374,66 +442,8 @@ pub fn trace(
         if (new_pos - origin).magnitude_squared() <= 0.0001 || accumulated_distance > max_len {
             break;
         }
-        if point_is_too_close_to_others(
-            new_pos,
-            horizontal_sector_count,
-            vertical_sector_count,
-            sector_map,
-            all_traces,
-            d_sep,
-        )
-        .is_some()
-        {
-            if new_seeds.is_empty() && (new_pos - origin).norm_squared() > 5.0 {
-                new_seeds.push(new_pos);
-            }
-            if !reverse {
-                let (mut trace_res_rev, new_seeds_rev, sectors_rev) = trace(
-                    tensor_field,
-                    origin,
-                    h,
-                    d_sep,
-                    follow_major_eigenvectors,
-                    max_len / 2.0,
-                    horizontal_sector_count,
-                    vertical_sector_count,
-                    sector_map,
-                    all_traces,
-                    opposite_family_sector_map,
-                    opposite_family_traces,
-                    true,
-                );
 
-                trace_res_rev.reverse();
-                trace_res_rev.extend(trace_res);
-                trace_res = trace_res_rev;
-                new_seeds.extend(new_seeds_rev);
-                sectors.extend(sectors_rev);
-            }
-            break;
-        }
         prev_direction = m;
-    }
-
-    if !reverse {
-        if let Some(closest_point) = point_is_too_close_to_others(
-            seed,
-            horizontal_sector_count,
-            vertical_sector_count,
-            &opposite_family_sector_map
-                .iter()
-                .chain(sector_map.iter())
-                .map(|(a, b)| (a.clone(), b.clone()))
-                .collect(),
-            &opposite_family_traces
-                .into_iter()
-                .chain(all_traces.into_iter())
-                .cloned()
-                .collect::<Vec<_>>(),
-            d_sep / 2.0,
-        ) {
-            trace_res.push(closest_point);
-        }
     }
 
     (trace_res, new_seeds, sectors)
@@ -448,100 +458,68 @@ fn clamp_vec_to_grid(vec: Vector2<f32>) -> Vector2<f32> {
     )
 }
 
-fn point_is_too_close_to_others(
-    point: Point,
-    horiztonal_sector_count: u32,
-    vertical_sector_count: u32,
-    sector_map: &HashMap<(u32, u32), Vec<usize>>,
-    all_traces: &[Vec<Point>],
+fn trim_trace(
+    trace: &[Point],
+    bounding_boxes: &[BoundingBox],
+    low: usize,
+    high: usize,
     d_sep: f32,
-) -> Option<Point> {
-    let horizontal_sector_size = GRID_SIZE / horiztonal_sector_count;
-    let vertical_sector_size = GRID_SIZE / vertical_sector_count;
-    let mut sorted_sectors: Vec<(u32, u32)> = (0..horiztonal_sector_count)
-        .flat_map(|x| {
-            (0..vertical_sector_count)
-                .map(|y| (x, y))
-                .collect::<Vec<_>>()
-        })
-        .collect();
+) -> Range<usize> {
+    let low_check = check_point_in_padded_bounding_boxes(trace[low], bounding_boxes, d_sep);
+    let high_check = check_point_in_padded_bounding_boxes(trace[high], bounding_boxes, d_sep);
 
-    sorted_sectors.sort_by(|a, b| {
-        let a = Point::new(a.0 as f32, a.1 as f32);
-        let b = Point::new(b.0 as f32, b.1 as f32);
+    let mid = (high - low) / 2;
 
-        let a_center = Point::new(
-            (a.x + 0.5) * horizontal_sector_size as f32,
-            (a.y + 0.5) * vertical_sector_size as f32,
-        );
-
-        let b_center = Point::new(
-            (b.x + 0.5) * horizontal_sector_size as f32,
-            (b.y + 0.5) * vertical_sector_size as f32,
-        );
-
-        (a_center - point)
-            .norm_squared()
-            .total_cmp(&(b_center - point).norm_squared())
-    });
-
-    for sector in sorted_sectors {
-        if let Some(closest_point) =
-            point_is_too_close_to_others_in_sector(point, &sector, sector_map, all_traces, d_sep)
-        {
-            return Some(closest_point);
+    if !low_check && !high_check {
+        Range {
+            start: low,
+            end: high,
         }
+    } else if low_check && high_check {
+        Range { start: 0, end: 0 }
+    } else if low_check && !high_check {
+        trim_trace(trace, bounding_boxes, mid + 1, high, d_sep)
+    } else {
+        trim_trace(trace, bounding_boxes, low, mid, d_sep)
     }
-
-    return None;
 }
 
-fn point_is_too_close_to_others_in_sector(
+fn check_point_in_padded_bounding_boxes(
     point: Point,
-    sector: &(u32, u32),
-    sector_map: &HashMap<(u32, u32), Vec<usize>>,
-    all_traces: &[Vec<Point>],
-    d_sep: f32,
-) -> Option<Point> {
-    let d_sep_squared = d_sep * d_sep;
-    let mut temp: Vec<Point> = sector_map[sector]
+    bounding_boxes: &[BoundingBox],
+    padding: f32,
+) -> bool {
+    bounding_boxes
         .iter()
-        .flat_map(|trace_index| {
-            let trace = &all_traces[*trace_index];
-            let eval_points = [
-                trace.first().unwrap(),
-                trace.last().unwrap(),
-                &trace[trace.len() / 2],
-            ];
+        .map(|b| b.check_point_collision_with_padding(point, padding))
+        .any(|x| x)
+}
 
-            let min_dist_point = eval_points.into_iter().map(|p| p - point).fold(
-                Point::new(f32::MAX, f32::MAX),
-                |acc, e| {
-                    if e.norm_squared() < acc.norm_squared() {
-                        e
-                    } else {
-                        acc
-                    }
-                },
-            );
+pub fn smooth_path(path: Vec<Point>, iterations: usize) -> Vec<Point> {
+    let lambda = 0.45;
+    let mu = -0.50;
+    let mut new_path = path;
 
-            if min_dist_point.norm_squared() <= d_sep_squared {
-                return Some(min_dist_point + point);
-            }
-            /* for node in &all_traces[*trace_index] {
-                if (node - point).norm_squared() <= d_sep * d_sep {
-                    return true;
-                }
-            } */
-            return None;
-        })
-        .collect();
+    let sum_pass = |path: &[Point], coeff: f32| {
+        path.iter()
+            .enumerate()
+            .map(|(i, point)| {
+                let prev_neighbor = (i != 0) as i32 as f32;
+                let next_neighbor = (i != path.len() - 1) as i32 as f32;
+                // println!("prev: {prev_neighbor}, next: {next_neighbor}");
+                let neighbors = [
+                    prev_neighbor * path[i - prev_neighbor as usize * 1],
+                    next_neighbor * path[i + next_neighbor as usize * 1],
+                ];
+                // dbg!(&neighbors);
+                point + coeff * (neighbors[0] + neighbors[1]) / (prev_neighbor + next_neighbor)
+            })
+            .collect::<Vec<_>>()
+    };
 
-    temp.sort_by(|a, b| {
-        (a - point)
-            .norm_squared()
-            .total_cmp(&(b - point).norm_squared())
-    });
+    for _ in 0..iterations {
+        new_path = sum_pass(&sum_pass(&new_path, lambda), mu);
+    }
 
-    temp.first().cloned()
+    new_path
 }

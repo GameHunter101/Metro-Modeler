@@ -2,7 +2,7 @@ use core::f32;
 
 use image::{EncodableLayout, ImageBuffer};
 use nalgebra::Vector2;
-use street_plan::trace_street_plan;
+use street_plan::{smooth_path, trace_street_plan};
 use tensor_field::{DesignElement, EvalEigenvectors, GRID_SIZE, TensorField};
 use v4::{
     builtin_components::mesh_component::{MeshComponent, VertexDescriptor},
@@ -11,6 +11,7 @@ use v4::{
 };
 use wgpu::vertex_attr_array;
 
+mod aabb;
 mod street_plan;
 mod tensor_field;
 
@@ -47,6 +48,17 @@ async fn main() {
     );
 
     let trace = trace_street_plan(&tensor_field, 30, city_center, 16, 16);
+
+    /* let sample_points = [
+        Vector2::<f32>::new(0.0, 0.4),
+        Vector2::<f32>::new(1.06, 1.84),
+        Vector2::<f32>::new(2.0, 1.2),
+        Vector2::<f32>::new(3.91, 2.48),
+        Vector2::<f32>::new(4.85, 1.06),
+        Vector2::<f32>::new(6.22, 2.34),
+    ].map(|x| x * 30.0).to_vec();
+
+    let trace = vec![sample_points.clone(), smooth_path(sample_points, 2)]; */
 
     let mut engine = v4::V4::builder()
         .features(wgpu::Features::POLYGON_MODE_LINE)
