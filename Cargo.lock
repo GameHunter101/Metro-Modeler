@@ -1620,9 +1620,10 @@ dependencies = [
 
 [[package]]
 name = "metro_modeler"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "bytemuck",
+ "futures",
  "image",
  "nalgebra",
  "rand 0.9.1",

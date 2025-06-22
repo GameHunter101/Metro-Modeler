@@ -1,6 +1,6 @@
 use core::f32;
 use std::{
-    collections::{BinaryHeap, HashMap, HashSet},
+    collections::{BinaryHeap, HashSet},
     ops::Range,
 };
 
@@ -172,7 +172,7 @@ fn sector_has_degenerate_point(
     return false;
 }
 
-pub fn trace_street_plan(
+pub async fn trace_street_plan(
     tensor_field: &TensorField,
     starting_seed_count: u32,
     city_center: Point,
@@ -271,7 +271,7 @@ pub fn trace_street_plan(
             continue;
         }
 
-        let trace_path = /* smooth_path( */trace_res.0[trimmed_range].to_vec()/* , 1) */;
+        let trace_path = trace_res.0[trimmed_range].to_vec();
 
         if !is_path_long_enough(&trace_path, d_sep) {
             continue;
@@ -308,7 +308,15 @@ pub fn trace_street_plan(
         }
     }
 
-    full_trace
+    futures::future::join_all(
+        full_trace
+            .into_iter()
+            .map(|trace| tokio::spawn(async move { smooth_path(trace, 0.05, 0.3) })),
+    )
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .expect("Failed to run smoothing")
 }
 
 fn is_path_long_enough(path: &[Point], d_sep: f32) -> bool {
@@ -495,31 +503,57 @@ fn check_point_in_padded_bounding_boxes(
         .any(|x| x)
 }
 
-pub fn smooth_path(path: Vec<Point>, iterations: usize) -> Vec<Point> {
-    let lambda = 0.45;
-    let mu = -0.50;
-    let mut new_path = path;
+fn point_vel(point_index: usize, path: &[Point]) -> Vector2<f32> {
+    path[point_index + 1] - path[point_index]
+}
 
-    let sum_pass = |path: &[Point], coeff: f32| {
-        path.iter()
-            .enumerate()
-            .map(|(i, point)| {
-                let prev_neighbor = (i != 0) as i32 as f32;
-                let next_neighbor = (i != path.len() - 1) as i32 as f32;
-                // println!("prev: {prev_neighbor}, next: {next_neighbor}");
-                let neighbors = [
-                    prev_neighbor * path[i - prev_neighbor as usize * 1],
-                    next_neighbor * path[i + next_neighbor as usize * 1],
-                ];
-                // dbg!(&neighbors);
-                point + coeff * (neighbors[0] + neighbors[1]) / (prev_neighbor + next_neighbor)
-            })
-            .collect::<Vec<_>>()
-    };
+pub fn smooth_path(path: Vec<Point>, alpha: f32, beta: f32) -> Vec<Point> {
+    let first_pass: Vec<Point> = path
+        .iter()
+        .enumerate()
+        .map(|(i, point)| {
+            if i == 0 || i == path.len() - 1 {
+                *point
+            } else {
+                let current_vel = point_vel(i, &path);
+                let prev_vel = point_vel(i - 1, &path);
 
-    for _ in 0..iterations {
-        new_path = sum_pass(&sum_pass(&new_path, lambda), mu);
-    }
+                let current_vel_normed = point_vel(i, &path).normalize();
+                let prev_vel_normed = point_vel(i - 1, &path).normalize();
 
-    new_path
+                let temp = ((1.0 - current_vel_normed.dot(&prev_vel_normed).min(1.0)).min(alpha)
+                    / alpha)
+                    .floor();
+
+                if temp == 0.0 {
+                    *point
+                } else {
+                    point
+                        + (current_vel - prev_vel) / 2.0
+                            * (current_vel.norm_squared() / (current_vel - prev_vel).norm_squared())
+                                .sqrt()
+                }
+            }
+        })
+        .collect();
+
+    first_pass
+        .iter()
+        .enumerate()
+        .map(|(i, point)| {
+            if i == 0 || i == first_pass.len() - 1 {
+                *point
+            } else if ((1.0 - beta)
+                + (point_vel(i, &first_pass).normalize()
+                    - point_vel(i - 1, &first_pass).normalize())
+                .norm())
+            .floor()
+                > 0.0
+            {
+                (first_pass[i - 1] + point + first_pass[i + 1]) / 3.0
+            } else {
+                *point
+            }
+        })
+        .collect()
 }
