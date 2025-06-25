@@ -308,11 +308,12 @@ pub async fn trace_street_plan(
         }
     }
 
-    futures::future::join_all(
-        full_trace
-            .into_iter()
-            .map(|trace| tokio::spawn(async move { smooth_path(trace, 0.05, 0.3) })),
-    )
+    futures::future::join_all(full_trace.into_iter().map(|trace| {
+        tokio::spawn(async move {
+            let first_pass = smooth_path(trace, 0.03, 0.3);
+            resample_curve(&first_pass, 0.7, 10, 20, 0.2)
+        })
+    }))
     .await
     .into_iter()
     .collect::<Result<Vec<_>, _>>()
@@ -503,10 +504,6 @@ fn check_point_in_padded_bounding_boxes(
         .any(|x| x)
 }
 
-fn point_vel(point_index: usize, path: &[Point]) -> Vector2<f32> {
-    path[point_index + 1] - path[point_index]
-}
-
 pub fn smooth_path(path: Vec<Point>, alpha: f32, beta: f32) -> Vec<Point> {
     let first_pass: Vec<Point> = path
         .iter()
@@ -515,17 +512,16 @@ pub fn smooth_path(path: Vec<Point>, alpha: f32, beta: f32) -> Vec<Point> {
             if i == 0 || i == path.len() - 1 {
                 *point
             } else {
-                let current_vel = point_vel(i, &path);
-                let prev_vel = point_vel(i - 1, &path);
+                let current_vel = point_first_deriv(i, &path);
+                let prev_vel = point_first_deriv(i - 1, &path);
 
-                let current_vel_normed = point_vel(i, &path).normalize();
-                let prev_vel_normed = point_vel(i - 1, &path).normalize();
+                let current_vel_normed = point_first_deriv(i, &path).normalize();
+                let prev_vel_normed = point_first_deriv(i - 1, &path).normalize();
 
-                let temp = ((1.0 - current_vel_normed.dot(&prev_vel_normed).min(1.0)).min(alpha)
-                    / alpha)
-                    .floor();
-
-                if temp == 0.0 {
+                if ((1.0 - current_vel_normed.dot(&prev_vel_normed).min(1.0)).min(alpha) / alpha)
+                    .floor()
+                    == 0.0
+                {
                     *point
                 } else {
                     point
@@ -544,8 +540,8 @@ pub fn smooth_path(path: Vec<Point>, alpha: f32, beta: f32) -> Vec<Point> {
             if i == 0 || i == first_pass.len() - 1 {
                 *point
             } else if ((1.0 - beta)
-                + (point_vel(i, &first_pass).normalize()
-                    - point_vel(i - 1, &first_pass).normalize())
+                + (point_first_deriv(i, &first_pass).normalize()
+                    - point_first_deriv(i - 1, &first_pass).normalize())
                 .norm())
             .floor()
                 > 0.0
@@ -556,4 +552,109 @@ pub fn smooth_path(path: Vec<Point>, alpha: f32, beta: f32) -> Vec<Point> {
             }
         })
         .collect()
+}
+
+fn point_first_deriv(point_index: usize, path: &[Point]) -> Vector2<f32> {
+    path[point_index + 1] - path[point_index]
+}
+
+pub fn point_second_deriv(point_index: usize, path: &[Point]) -> Vector2<f32> {
+    point_first_deriv(point_index, path).normalize()
+        - point_first_deriv(point_index - 1, path).normalize()
+}
+
+pub fn resample_curve(
+    path: &[Point],
+    blend_factor: f32,
+    points_per_spline: i32,
+    point_padding_per_side: usize,
+    h: f32,
+) -> Vec<Point> {
+    let mut control_points: Vec<usize> = highest_curvature_points(&path, point_padding_per_side);
+
+    control_points.sort();
+
+    let sampler = |p_0: Point, p_1: Point, m_0: Vector2<f32>, m_1: Vector2<f32>| -> Vec<Point> {
+        (0..=points_per_spline)
+            .map(|i| {
+                evaluate_hermite_curve(p_0, p_1, m_0, m_1, i as f32 / points_per_spline as f32)
+            })
+            .collect()
+    };
+
+    let h_square = h * h;
+
+    control_points[..control_points.len() - 1]
+        .iter()
+        .enumerate()
+        .flat_map(|(i, &control_point_index)| {
+            let p_0 = path[control_point_index];
+            if i == 0 {
+                let p_1 = path[control_points[1]];
+                let m_0 = (path[1] - p_0) / h_square;
+                let m_1 = if control_points.len() == 2 {
+                    (path[path.len() - 1] - path[path.len() - 2]) / h_square
+                } else {
+                    blend_factor
+                        * ((path[control_points[1] + 1] - p_1) / h_square
+                            + (p_1 - path[control_points[1] - 1]) / h_square)
+                };
+                let res = sampler(p_0, p_1, m_0, m_1);
+                res[..res.len() - 1].to_vec()
+            } else if i == control_points.len() - 2 {
+                let p_1 = path[path.len() - 1];
+                let m_0 = blend_factor
+                    * ((path[control_point_index + 1] - p_0) / h_square
+                        + (p_0 - path[control_point_index - 1]) / h_square);
+                let m_1 = (path[path.len() - 1] - path[path.len() - 2]) / h_square;
+                sampler(p_0, p_1, m_0, m_1)[1..].to_vec()
+            } else {
+                let p_1 = path[control_points[i + 1]];
+                let m_0 = blend_factor
+                    * ((path[control_point_index + 1] - p_0) / h_square
+                        + (p_0 - path[control_point_index - 1]) / h_square);
+                let m_1 = blend_factor
+                    * ((path[control_points[i + 1] + 1] - p_1) / h_square
+                        + (p_1 - path[control_points[i + 1] - 1]) / h_square);
+                let res = sampler(p_0, p_1, m_0, m_1);
+                res[..res.len()].to_vec()
+            }
+        })
+        .collect()
+}
+
+pub fn highest_curvature_points(path: &[Point], point_padding_per_side: usize) -> Vec<usize> {
+    let mut indices_sorted_by_curvature: Vec<usize> = (1..path.len() - 1).collect();
+    indices_sorted_by_curvature.sort_by(|&a, &b| {
+        point_second_deriv(a, path)
+            .norm_squared()
+            .partial_cmp(&point_second_deriv(b, path).norm_squared())
+            .unwrap()
+            .reverse()
+    });
+    let mut curvature_point_indices = vec![0, path.len() - 1];
+    indices_sorted_by_curvature
+        .into_iter()
+        .filter(|&index| {
+            for curvature_index in &curvature_point_indices {
+                if curvature_index.abs_diff(index) < point_padding_per_side {
+                    return false;
+                }
+            }
+            curvature_point_indices.push(index);
+            true
+        })
+        .chain(vec![0, path.len() - 1])
+        .collect()
+}
+
+pub fn evaluate_hermite_curve(
+    p_0: Point,
+    p_1: Point,
+    m_0: Vector2<f32>,
+    m_1: Vector2<f32>,
+    t: f32,
+) -> Point {
+    t * (t * (t * (2.0 * (p_0 - p_1) + m_0 + m_1) - 2.0 * m_0 - m_1 - 3.0 * (p_0 - p_1)) + m_0)
+        + p_0
 }

@@ -2,7 +2,7 @@ use core::f32;
 
 use image::{EncodableLayout, ImageBuffer};
 use nalgebra::Vector2;
-use street_plan::{smooth_path, trace_street_plan};
+use street_plan::trace_street_plan;
 use tensor_field::{DesignElement, EvalEigenvectors, GRID_SIZE, TensorField};
 use v4::{
     builtin_components::mesh_component::{MeshComponent, VertexDescriptor},
@@ -47,7 +47,7 @@ async fn main() {
         0.0004,
     );
 
-    let trace = trace_street_plan(&tensor_field, 30, city_center, 16, 16).await;
+    let trace = trace_street_plan(&tensor_field, 3, city_center, 16, 16).await;
 
     let mut engine = v4::V4::builder()
         .features(wgpu::Features::POLYGON_MODE_LINE)
