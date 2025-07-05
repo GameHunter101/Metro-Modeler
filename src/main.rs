@@ -47,7 +47,7 @@ async fn main() {
         0.0004,
     );
 
-    let trace = trace_street_plan(&tensor_field, 3, city_center, 16, 16).await;
+    let (trace, major_len) = trace_street_plan(&tensor_field, 30, city_center, 16, 16).await;
 
     let mut engine = v4::V4::builder()
         .features(wgpu::Features::POLYGON_MODE_LINE)
@@ -78,6 +78,32 @@ async fn main() {
     let queue = rendering_manager.queue();
 
     let vector_opacity = 0.4;
+
+    let bounding_boxes: Vec<aabb::BoundingBox> = trace[..major_len]
+        .iter()
+        .map(|trace| aabb::BoundingBox::new(trace))
+        .collect();
+
+    let bounding_box_points: Vec<Vec<Vertex>> = bounding_boxes
+        .iter()
+        .map(|bb| {
+            let positions = [
+                Vector2::new(bb.east(), bb.north()),
+                Vector2::new(bb.east(), bb.south()),
+                Vector2::new(bb.west(), bb.south()),
+                Vector2::new(bb.west(), bb.north()),
+                Vector2::new(bb.east(), bb.north()),
+            ];
+
+            positions.map(|pos| {
+                let vector = normalize_vector(pos);
+                Vertex {
+                    pos: [vector.x, vector.y, 0.01],
+                    col: [1.0, 0.0, 0.0, 1.0],
+                }
+            }).to_vec()
+        })
+        .collect();
 
     scene! {
         scene: visualizer,
@@ -113,6 +139,26 @@ async fn main() {
                         }).collect::<Vec<_>>()).collect()
                     ],
                     enabled_models: vec![(0, None)]
+                ),
+            ]
+        },
+        "bounding_boxes" = {
+            material: {
+                pipeline: {
+                    vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
+                    fragment_shader_path: "./shaders/visualizer_fragment.wgsl",
+                    vertex_layouts: [Vertex::vertex_layout()],
+                    uses_camera: false,
+                    geometry_details: {
+                        topology: wgpu::PrimitiveTopology::LineStrip,
+                        polygon_mode: wgpu::PolygonMode::Line,
+                    },
+                },
+            },
+            components: [
+                MeshComponent(
+                    vertices: bounding_box_points,
+                    enabled_models: (0..major_len).map(|i| (i, None)).collect()
                 ),
             ]
         },
