@@ -1,14 +1,11 @@
 use core::f32;
-use std::{collections::BinaryHeap, ops::Range};
+use std::collections::BinaryHeap;
 
 use nalgebra::Vector2;
 use rand::Rng;
 use tokio::task::JoinError;
 
-use crate::{
-    aabb::BoundingBox,
-    tensor_field::{EvalEigenvectors, GRID_SIZE, Point, TensorField},
-};
+use crate::tensor_field::{EvalEigenvectors, GRID_SIZE, Point, TensorField};
 
 pub fn distribute_points(point_count: u32) -> Vec<Point> {
     let mut rand = rand::rng();
@@ -60,7 +57,7 @@ fn closest_distance_to_points(candidate: Point, points: &[Point]) -> f32 {
 pub struct SeedPoint {
     pub seed: Point,
     pub priority: f32,
-    pub follow_major_eigenvector: bool,
+    pub follow_major_eigenvectors: bool,
 }
 
 impl Eq for SeedPoint {}
@@ -90,7 +87,7 @@ pub fn prioritize_points(
                 Some(SeedPoint {
                     seed: *point,
                     priority: city_center_priority + degenerate_point_priority,
-                    follow_major_eigenvector: true,
+                    follow_major_eigenvectors: true,
                 })
             }
         })
@@ -217,37 +214,61 @@ pub async fn trace_street_plan(
         &tensor_field,
     );
 
-    let h = 0.2;
-    let d_sep = 20.0;
+    ((0..5)
+        .map(|i| {
+            pollster::block_on(async {
+                let h = 0.2;
+                let d_sep = 20.0;
+                let follow_major_eigenvectors = (i % 2) == 0;
 
-    let traces = trace_lanes(
-        seed_points
-            .into_iter()
-            .enumerate()
-            .map(|(i, seed)| (i, seed.seed))
-            .collect(),
-        tensor_field,
-        h,
-        d_sep,
-        true,
-        200.0,
-        false,
-    )
-    .await;
+                let traces = trace_lanes(
+                    seed_points
+                        .iter()
+                        .enumerate()
+                        .map(|(i, seed)| (i, seed.seed))
+                        .collect::<Vec<_>>(),
+                    tensor_field,
+                    h,
+                    d_sep,
+                    follow_major_eigenvectors,
+                    200.0,
+                    false,
+                )
+                .await;
 
-    let curve_paths = smooth_lanes(traces, 0.03, 0.3, 20, h, 0.7)
-        .await
-        .unwrap();
+                let pre: usize = traces.iter().map(|TraceOutput { new_seeds, .. }| new_seeds.len()).sum();
 
-    let clipped_paths = clip_pass(curve_paths, d_sep);
+                let curve_paths = smooth_lanes(traces, 0.03, 0.3, 20, h, 0.7).await.unwrap();
 
-    (
+                let (clipped_paths, new_seeds): (Vec<HermiteCurve>, Vec<Vec<Point>>) =
+                    clip_pass(curve_paths, d_sep).into_iter().unzip();
+
+                println!("Pre: {pre}, post: {}", new_seeds.len());
+
+                seed_points.extend(new_seeds.into_iter().flatten().map(|seed| SeedPoint {
+                    seed,
+                    priority: 0.0,
+                    follow_major_eigenvectors,
+                }));
+
+                clipped_paths
+                    .iter()
+                    .map(|control_points| resample_curve(control_points, 20))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .into_iter()
+        .flatten()
+        .filter(|v| !v.is_empty())
+        .collect::<Vec<_>>(), 1)
+
+    /* (
         clipped_paths
             .iter()
             .map(|control_points| resample_curve(control_points, 20))
             .collect(),
         clipped_paths.len(),
-    )
+    ) */
 
     /* let mut major_line_traces = Vec::new();
     let mut major_bounding_boxes: Vec<BoundingBox> = Vec::new();
@@ -412,7 +433,7 @@ async fn trace_lanes(
 #[derive(Debug, Clone, Default)]
 struct TraceOutput {
     path: Vec<Point>,
-    new_seeds: Vec<Point>,
+    new_seeds: Vec<(Point, f32)>,
 }
 
 fn trace(
@@ -428,6 +449,7 @@ fn trace(
     let mut seed = seed;
     let mut path = vec![seed];
     let mut accumulated_distance = 0.0;
+    let mut distance_since_last_seed = 0.0;
     let mut new_seeds = vec![];
     let mut steps = 0;
 
@@ -443,11 +465,7 @@ fn trace(
     {
         let tensor = tensor_field.evaluate_smoothed_field_at_point(seed);
 
-        if tensor.eigenvalues().is_none() {
-            break;
-        }
-
-        if tensor.norm_squared() <= 0.00001 {
+        if tensor.eigenvalues().is_none() || tensor.norm_squared() < 0.00001 {
             break;
         }
 
@@ -495,11 +513,14 @@ fn trace(
         let m = 1.0 / 6.0 * k_1 + 1.0 / 3.0 * k_2 + 1.0 / 3.0 * k_3 + 1.0 / 6.0 * k_4;
 
         let new_pos = seed + h * m;
+        let dist = (new_pos - seed).norm();
 
-        accumulated_distance += (new_pos - seed).norm();
-        if accumulated_distance >= d_sep {
-            accumulated_distance = 0.0;
-            new_seeds.push(new_pos);
+        accumulated_distance += dist;
+        distance_since_last_seed += dist;
+
+        if distance_since_last_seed >= d_sep {
+            distance_since_last_seed = 0.0;
+            new_seeds.push((new_pos, accumulated_distance));
         }
         seed = new_pos;
 
@@ -514,6 +535,11 @@ fn trace(
             break;
         }
     }
+
+    let new_seeds = new_seeds
+        .into_iter()
+        .map(|(e, f)| (e, f / accumulated_distance))
+        .collect();
 
     TraceOutput { path, new_seeds }
 }
@@ -553,6 +579,11 @@ struct ControlPoint {
 
 type HermiteCurve = Vec<ControlPoint>;
 
+struct SmoothedCurve {
+    curve: HermiteCurve,
+    new_seeds: Vec<(Point, f32)>,
+}
+
 async fn smooth_lanes(
     traces: Vec<TraceOutput>,
     alpha: f32,
@@ -560,20 +591,19 @@ async fn smooth_lanes(
     point_side_padding: usize,
     h: f32,
     blend_factor: f32,
-) -> Result<Vec<HermiteCurve>, JoinError> {
+) -> Result<Vec<SmoothedCurve>, JoinError> {
     let h_square = h * h;
     let (_, res) = async_scoped::TokioScope::scope_and_block(|scope| {
-        for trace in traces{
-            let raw_path = trace.path;
+        for TraceOutput { path, new_seeds } in traces {
             scope.spawn(async move {
-                let smoothed_path = smooth_path(raw_path.clone(), alpha, beta);
+                let smoothed_path = smooth_path(path.clone(), alpha, beta);
 
                 let mut control_points_indices: Vec<usize> =
                     highest_curvature_points(&smoothed_path, point_side_padding);
 
                 control_points_indices.sort();
 
-                control_points_indices
+                let curve = control_points_indices
                     .iter()
                     .map(|&index| {
                         let position = smoothed_path[index];
@@ -591,7 +621,9 @@ async fn smooth_lanes(
 
                         ControlPoint { position, velocity }
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+
+                SmoothedCurve { curve, new_seeds }
             });
         }
     });
@@ -707,11 +739,19 @@ pub fn highest_curvature_points(path: &[Point], point_padding_per_side: usize) -
         .collect()
 }
 
-fn clip_pass(curve_paths: Vec<HermiteCurve>, d_sep: f32) -> Vec<HermiteCurve> {
+fn clip_pass(curve_paths: Vec<SmoothedCurve>, d_sep: f32) -> Vec<(HermiteCurve, Vec<Point>)> {
     let d_sep_squared = d_sep * d_sep;
+    println!("Target: {d_sep_squared}");
     (1..curve_paths.len())
         .flat_map(|curve_index| {
-            let current_curve = &curve_paths[curve_index];
+            let SmoothedCurve {
+                curve: current_curve,
+                new_seeds,
+            } = &curve_paths[curve_index];
+            if distance_squared_to_nearest_curve_approximation(current_curve[0].position, &curve_paths[..curve_index]) < (0.85 * d_sep_squared) {
+                return None;
+            }
+
             let control_point_distances_squared: Vec<f32> = current_curve
                 .iter()
                 .map(|control_point| {
@@ -721,22 +761,35 @@ fn clip_pass(curve_paths: Vec<HermiteCurve>, d_sep: f32) -> Vec<HermiteCurve> {
                     )
                 })
                 .collect();
-            let filtered: HermiteCurve = control_point_distances_squared
-                .into_iter()
-                .enumerate()
-                .flat_map(|(i, dist_squared)| {
-                    if dist_squared < d_sep_squared {
-                        None
-                    } else {
-                        Some(current_curve[i])
-                    }
-                })
-                .collect();
+
+            let mut clipped_index = 0;
+            for dist_squared in &control_point_distances_squared {
+                if *dist_squared >= d_sep_squared {
+                    clipped_index += 1;
+                } else {
+                    break;
+                }
+            }
+
+
+            let filtered: HermiteCurve = current_curve[..clipped_index].iter().copied().collect();
 
             if filtered.is_empty() {
                 None
             } else {
-                Some(filtered)
+                Some((
+                    filtered,
+                    new_seeds
+                        .iter()
+                        .flat_map(|(seed, t)| {
+                            if *t < (clipped_index as f32 / current_curve.len() as f32) {
+                                Some(*seed)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                ))
             }
         })
         .collect()
@@ -744,15 +797,15 @@ fn clip_pass(curve_paths: Vec<HermiteCurve>, d_sep: f32) -> Vec<HermiteCurve> {
 
 fn distance_squared_to_nearest_curve_approximation(
     point: Point,
-    path_control_points: &[Vec<ControlPoint>],
+    other_curves: &[SmoothedCurve],
 ) -> f32 {
-    path_control_points
+    other_curves
         .iter()
-        .map(|path| {
-            (0..path.len() - 1)
+        .map(|SmoothedCurve { curve, .. }| {
+            (0..curve.len() - 1)
                 .map(|start_index| {
-                    let p_0 = path[start_index].position;
-                    let p_1 = path[start_index + 1].position;
+                    let p_0 = curve[start_index].position;
+                    let p_1 = curve[start_index + 1].position;
                     let segment_vector = p_1 - p_0;
                     let projection = project_vector(point - p_0, segment_vector);
 
@@ -778,33 +831,4 @@ fn evaluate_hermite_curve(
 ) -> Point {
     t * (t * (t * (2.0 * (p_0 - p_1) + m_0 + m_1) - 2.0 * m_0 - m_1 - 3.0 * (p_0 - p_1)) + m_0)
         + p_0
-}
-
-fn spawn_new_points(
-    control_point_curves: &[Vec<ControlPoint>],
-    d_sep: f32,
-    follow_major_eigenvectors: bool,
-    min_curve_length: f32,
-) -> Vec<Point> {
-    control_point_curves
-        .iter()
-        .flat_map(|control_points| {
-            let curve_length = approximated_hermite_length(control_points);
-
-            if curve_length < min_curve_length {
-                Vec::new()
-            } else {
-                vec![]
-            }
-        })
-        .collect()
-}
-
-fn approximated_hermite_length(control_points: &[ControlPoint]) -> f32 {
-    control_points[1..]
-        .iter()
-        .enumerate()
-        .fold(0.0, |acc, (i, e)| {
-            acc + (e.position - control_points[i - 1].position).norm()
-        })
 }
