@@ -214,175 +214,79 @@ pub async fn trace_street_plan(
         &tensor_field,
     );
 
-    ((0..5)
-        .map(|i| {
-            pollster::block_on(async {
-                let h = 0.2;
-                let d_sep = 20.0;
-                let follow_major_eigenvectors = (i % 2) == 0;
+    let mut major_curves = Vec::new();
+    let mut minor_curves = Vec::new();
 
-                let traces = trace_lanes(
-                    seed_points
-                        .iter()
-                        .enumerate()
-                        .map(|(i, seed)| (i, seed.seed))
-                        .collect::<Vec<_>>(),
-                    tensor_field,
-                    h,
-                    d_sep,
-                    follow_major_eigenvectors,
-                    200.0,
-                    false,
-                )
-                .await;
+    for i in 0..5 {
+        pollster::block_on(async {
+            let h = 0.2;
+            let d_sep = 20.0;
+            let follow_major_eigenvectors = (i % 2) == 0;
 
-                let pre: usize = traces.iter().map(|TraceOutput { new_seeds, .. }| new_seeds.len()).sum();
-
-                let curve_paths = smooth_lanes(traces, 0.03, 0.3, 20, h, 0.7).await.unwrap();
-
-                let (clipped_paths, new_seeds): (Vec<HermiteCurve>, Vec<Vec<Point>>) =
-                    clip_pass(curve_paths, d_sep).into_iter().unzip();
-
-                println!("Pre: {pre}, post: {}", new_seeds.len());
-
-                seed_points.extend(new_seeds.into_iter().flatten().map(|seed| SeedPoint {
-                    seed,
-                    priority: 0.0,
-                    follow_major_eigenvectors,
-                }));
-
-                clipped_paths
+            let traces = trace_lanes(
+                seed_points
                     .iter()
-                    .map(|control_points| resample_curve(control_points, 20))
-                    .collect::<Vec<_>>()
-            })
-        })
-        .into_iter()
-        .flatten()
-        .filter(|v| !v.is_empty())
-        .collect::<Vec<_>>(), 1)
+                    .enumerate()
+                    .map(|(i, seed)| (i, seed.seed))
+                    .collect::<Vec<_>>(),
+                tensor_field,
+                h,
+                d_sep,
+                follow_major_eigenvectors,
+                200.0,
+                false,
+            )
+            .await;
 
-    /* (
-        clipped_paths
-            .iter()
-            .map(|control_points| resample_curve(control_points, 20))
-            .collect(),
-        clipped_paths.len(),
-    ) */
+            let pre: usize = traces
+                .iter()
+                .map(|TraceOutput { new_seeds, .. }| new_seeds.len())
+                .sum();
 
-    /* let mut major_line_traces = Vec::new();
-    let mut major_bounding_boxes: Vec<BoundingBox> = Vec::new();
+            let curve_paths = smooth_lanes(traces, 0.03, 0.3, 20, h, 0.7).await.unwrap();
 
-    let mut minor_line_traces = Vec::new();
-    let mut minor_bounding_boxes: Vec<BoundingBox> = Vec::new();
+            let (clipped_paths, new_seeds): (Vec<HermiteCurve>, Vec<Vec<Point>>) = clip_pass(
+                curve_paths,
+                if follow_major_eigenvectors {
+                    &major_curves
+                } else {
+                    &minor_curves
+                },
+                d_sep,
+                d_sep * 2.0,
+            )
+            .into_iter()
+            .unzip();
 
-    // let mut full_trace = Vec::new();
+            println!("Pre: {pre}, post: {}", new_seeds.len());
 
-    while let Some(SeedPoint {
-        seed,
-        follow_major_eigenvector,
-        ..
-    }) = seed_points.pop()
-    {
-        let d_sep = 20.0; // + 0.7 * (seed - city_center).norm();
-        let trace_res = trace(
-            tensor_field,
-            seed,
-            0.2,
-            d_sep,
-            follow_major_eigenvector,
-            200.0,
-            false,
-        );
+            seed_points.extend(new_seeds.into_iter().flatten().map(|seed| SeedPoint {
+                seed,
+                priority: 0.0,
+                follow_major_eigenvectors,
+            }));
 
-        if trace_res.raw_points.is_empty() {
-            continue;
-        }
-
-        let trimmed_range = trim_trace(
-            &trace_res.raw_points,
-            if follow_major_eigenvector {
-                &major_bounding_boxes
+            if follow_major_eigenvectors {
+                major_curves.extend(clipped_paths);
             } else {
-                &minor_bounding_boxes
-            },
-            0,
-            trace_res.raw_points.len() - 1,
-            d_sep,
-        );
-
-        if trimmed_range.end - trimmed_range.start < 10 {
-            continue;
-        }
-
-        let trace_path = trace_res.raw_points[trimmed_range].to_vec();
-
-        if !is_path_long_enough(&trace_path, d_sep) {
-            continue;
-        }
-
-        let mut bounding_box = vec![BoundingBox::new(&trace_path)];
-        let frac_1_sqrt_2 = std::f32::consts::FRAC_1_SQRT_2;
-        let bb = &bounding_box[0];
-        let rectangularness = Vector2::new(bb.east() - bb.west(), bb.north() - bb.south())
-            .normalize()
-            .dot(&Vector2::new(frac_1_sqrt_2, frac_1_sqrt_2));
-        if rectangularness > 0.5 || rectangularness < 3.0_f32.sqrt() / 2.0 {
-            bounding_box = vec![
-                BoundingBox::new(&trace_path[..trace_path.len() / 2]),
-                BoundingBox::new(&trace_path[trace_path.len() / 2..]),
-            ];
-        }
-
-        // full_trace.push(trace_path.clone());
-
-        if follow_major_eigenvector {
-            major_line_traces.push(trace_path);
-            major_bounding_boxes.extend(bounding_box);
-        } else {
-            minor_line_traces.push(trace_path);
-            minor_bounding_boxes.extend(bounding_box);
-        }
-        for new_seed in trace_res.new_seeds {
-            seed_points.push(SeedPoint {
-                seed: new_seed,
-                priority: f32::MAX,
-                follow_major_eigenvector: !follow_major_eigenvector,
-            });
-        }
+                minor_curves.extend(clipped_paths);
+            }
+        })
     }
 
-    let len = major_line_traces.len();
-    let mut full_trace = major_line_traces;
-    full_trace.extend(minor_line_traces);
+    let major_len = major_curves.len();
 
-    (
-        futures::future::join_all(full_trace.into_iter().map(|trace| {
-            tokio::spawn(async move {
-                let first_pass = smooth_path(trace, 0.03, 0.3);
-                resample_curve(&first_pass, 0.7, 10, 20, 0.2)
-            })
-        }))
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .expect("Failed to run smoothing"),
-        len,
-    ) */
-}
+    let resampled_points: Result<Vec<Vec<Point>>, JoinError> = futures::future::join_all(
+        major_curves
+            .into_iter()
+            .chain(minor_curves)
+            .map(|curve| tokio::spawn(async { resample_curve(curve, 20) })),
+    )
+    .await
+    .into_iter()
+    .collect();
 
-fn is_path_long_enough(path: &[Point], d_sep: f32) -> bool {
-    let mut last_point = path[0];
-    let mut dist = 0.0;
-    for point in path {
-        dist += (point - last_point).norm();
-        if dist > d_sep {
-            return true;
-        }
-        last_point = *point;
-    }
-
-    false
+    (resampled_points.unwrap(), major_len)
 }
 
 async fn trace_lanes(
@@ -690,7 +594,7 @@ pub fn point_second_deriv(point_index: usize, path: &[Point]) -> Vector2<f32> {
         - point_first_deriv(point_index - 1, path).normalize()
 }
 
-fn resample_curve(control_points: &[ControlPoint], points_per_spline: i32) -> Vec<Point> {
+fn resample_curve(control_points: Vec<ControlPoint>, points_per_spline: i32) -> Vec<Point> {
     let sampler = |p_0: Point, p_1: Point, m_0: Vector2<f32>, m_1: Vector2<f32>| -> Vec<Point> {
         (0..=points_per_spline)
             .map(|i| {
@@ -739,16 +643,31 @@ pub fn highest_curvature_points(path: &[Point], point_padding_per_side: usize) -
         .collect()
 }
 
-fn clip_pass(curve_paths: Vec<SmoothedCurve>, d_sep: f32) -> Vec<(HermiteCurve, Vec<Point>)> {
+fn clip_pass(
+    curve_paths: Vec<SmoothedCurve>,
+    previous_curves: &[HermiteCurve],
+    d_sep: f32,
+    min_length: f32,
+) -> Vec<(HermiteCurve, Vec<Point>)> {
     let d_sep_squared = d_sep * d_sep;
-    println!("Target: {d_sep_squared}");
     (1..curve_paths.len())
         .flat_map(|curve_index| {
             let SmoothedCurve {
                 curve: current_curve,
                 new_seeds,
             } = &curve_paths[curve_index];
-            if distance_squared_to_nearest_curve_approximation(current_curve[0].position, &curve_paths[..curve_index]) < (0.85 * d_sep_squared) {
+
+            let prev_curves_as_hermite: Vec<HermiteCurve> = curve_paths[..curve_index]
+                .iter()
+                .map(|curve| curve.curve.clone())
+                .chain(previous_curves.iter().cloned())
+                .collect();
+
+            if distance_squared_to_nearest_curve_approximation(
+                current_curve[0].position,
+                &prev_curves_as_hermite,
+            ) < (0.85 * d_sep_squared)
+            {
                 return None;
             }
 
@@ -757,7 +676,7 @@ fn clip_pass(curve_paths: Vec<SmoothedCurve>, d_sep: f32) -> Vec<(HermiteCurve, 
                 .map(|control_point| {
                     distance_squared_to_nearest_curve_approximation(
                         control_point.position,
-                        &curve_paths[..curve_index],
+                        &prev_curves_as_hermite,
                     )
                 })
                 .collect();
@@ -771,8 +690,24 @@ fn clip_pass(curve_paths: Vec<SmoothedCurve>, d_sep: f32) -> Vec<(HermiteCurve, 
                 }
             }
 
+            if clipped_index < 2 {
+                return None;
+            }
 
             let filtered: HermiteCurve = current_curve[..clipped_index].iter().copied().collect();
+
+            let clipped_length =
+                filtered[1..]
+                    .iter()
+                    .enumerate()
+                    .fold(0.0, |acc, (i, control_point)| {
+                        acc + (control_point.position - filtered[i].position).norm()
+                    });
+
+            if clipped_length < min_length {
+                return None;
+            }
+
 
             if filtered.is_empty() {
                 None
@@ -797,11 +732,11 @@ fn clip_pass(curve_paths: Vec<SmoothedCurve>, d_sep: f32) -> Vec<(HermiteCurve, 
 
 fn distance_squared_to_nearest_curve_approximation(
     point: Point,
-    other_curves: &[SmoothedCurve],
+    other_curves: &[HermiteCurve],
 ) -> f32 {
     other_curves
         .iter()
-        .map(|SmoothedCurve { curve, .. }| {
+        .map(|curve| {
             (0..curve.len() - 1)
                 .map(|start_index| {
                     let p_0 = curve[start_index].position;
