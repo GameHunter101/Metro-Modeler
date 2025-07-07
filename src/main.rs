@@ -42,10 +42,17 @@ async fn main() {
 
     let city_center = *radial_element.center().as_ref().unwrap();
 
-    let tensor_field = TensorField::new(
+    let mut tensor_field = TensorField::new(
         vec![grid_element, radial_element, grid_element_2, grid_element_3],
         0.0004,
     );
+    let first_time = std::time::Instant::now();
+    tensor_field.fill_sync();
+    println!("Sync: {}", first_time.elapsed().as_millis());
+
+    let second_time = std::time::Instant::now();
+    tensor_field.fill_async().await;
+    println!("Async: {}", second_time.elapsed().as_millis());
 
     let (trace, major_len) = trace_street_plan(&tensor_field, 30, city_center, 16, 16).await;
 
@@ -65,9 +72,12 @@ async fn main() {
     let mut norm_tex = ImageBuffer::new(GRID_SIZE, GRID_SIZE);
 
     for (x, y, pix) in norm_tex.enumerate_pixels_mut() {
-        let val = (tensor_field
-            .evaluate_field_at_point(Vector2::new(x as f32, y as f32))
-            .norm()
+        let val = (TensorField::evaluate_field_at_point(
+            Vector2::new(x as f32, y as f32),
+            tensor_field.design_elements(),
+            tensor_field.decay_constant(),
+        )
+        .norm()
             > 0.01) as u8
             * 255;
         *pix = image::Rgba([val, val, val, 100]);
@@ -95,13 +105,15 @@ async fn main() {
                 Vector2::new(bb.east(), bb.north()),
             ];
 
-            positions.map(|pos| {
-                let vector = normalize_vector(pos);
-                Vertex {
-                    pos: [vector.x, vector.y, 0.01],
-                    col: [1.0, 0.0, 0.0, 1.0],
-                }
-            }).to_vec()
+            positions
+                .map(|pos| {
+                    let vector = normalize_vector(pos);
+                    Vertex {
+                        pos: [vector.x, vector.y, 0.01],
+                        col: [1.0, 0.0, 0.0, 1.0],
+                    }
+                })
+                .to_vec()
         })
         .collect();
 
@@ -125,7 +137,7 @@ async fn main() {
                     vertices: vec![
                         (0..GRID_SIZE / sample_factor).flat_map(|x| (0..GRID_SIZE / sample_factor).flat_map(|y| {
                             let point = Vector2::new(x as f32 * sample_factor as f32, y as f32 * sample_factor as f32);
-                            let tensor = tensor_field.evaluate_field_at_point(point);
+                            let tensor = TensorField::evaluate_field_at_point(point, tensor_field.design_elements(), tensor_field.decay_constant());
                             let eigenvectors = tensor.eigenvectors();
                             let maj = eigenvectors.major.normalize() * (sample_factor - 1) as f32;
                             let min = eigenvectors.minor.normalize() * (sample_factor - 1) as f32;

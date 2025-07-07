@@ -7,6 +7,7 @@ pub type Point = Vector2<f32>;
 
 #[derive(Debug)]
 pub struct TensorField {
+    grid: Box<[Eigenvectors]>,
     design_elements: Vec<DesignElement>,
     decay_constant: f32,
 }
@@ -14,9 +15,43 @@ pub struct TensorField {
 impl TensorField {
     pub fn new(design_elements: Vec<DesignElement>, decay_constant: f32) -> TensorField {
         TensorField {
+            grid: vec![Eigenvectors::default(); (GRID_SIZE * GRID_SIZE) as usize]
+                .into_boxed_slice(),
             design_elements,
             decay_constant,
         }
+    }
+
+    pub fn fill_sync(&mut self) {
+        for row in 0..GRID_SIZE as usize {
+            for col in 0..GRID_SIZE as usize {
+                self.grid[row * GRID_SIZE as usize + col] = Self::evaluate_smoothed_field_at_point(
+                    Point::new(col as f32, row as f32),
+                    &self.design_elements,
+                    self.decay_constant,
+                )
+                .eigenvectors();
+            }
+        }
+    }
+
+    pub async fn fill_async(&mut self) {
+        let design_elements = &self.design_elements;
+        let decay_constant = self.decay_constant;
+        async_scoped::TokioScope::scope_and_block(|scope| {
+            for (row, chunk) in self.grid.chunks_mut(GRID_SIZE as usize).enumerate() {
+                scope.spawn(async move {
+                    for col in 0..GRID_SIZE as usize {
+                        chunk[col] = Self::evaluate_smoothed_field_at_point(
+                            Point::new(col as f32, row as f32),
+                            design_elements,
+                            decay_constant,
+                        )
+                        .eigenvectors()
+                    }
+                });
+            }
+        });
     }
 
     pub fn add_design_element(&mut self, design_element: DesignElement) {
@@ -28,8 +63,8 @@ impl TensorField {
     }
 
     fn sum_elements(
-        design_elements: &[DesignElement],
         point: Point,
+        design_elements: &[DesignElement],
         decay_constant: f32,
     ) -> Tensor {
         design_elements
@@ -45,12 +80,20 @@ impl TensorField {
             .sum()
     }
 
-    pub fn evaluate_field_at_point(&self, point: Point) -> Tensor {
-        Self::sum_elements(&self.design_elements, point, self.decay_constant)
+    pub fn evaluate_field_at_point(
+        point: Point,
+        design_elements: &[DesignElement],
+        decay_constant: f32,
+    ) -> Tensor {
+        Self::sum_elements(point, design_elements, decay_constant)
     }
 
-    pub fn evaluate_smoothed_field_at_point(&self, point: Point) -> Tensor {
-        let mut sum = self.evaluate_field_at_point(point);
+    pub fn evaluate_smoothed_field_at_point(
+        point: Point,
+        design_elements: &[DesignElement],
+        decay_constant: f32,
+    ) -> Tensor {
+        let mut sum = Self::evaluate_field_at_point(point, design_elements, decay_constant);
         let mut count = 1;
         let mut neighbors = Vec::new();
         if point.x >= 1.0 {
@@ -71,14 +114,22 @@ impl TensorField {
 
         sum += neighbors
             .into_iter()
-            .map(|vec| self.evaluate_field_at_point(point + vec))
+            .map(|vec| Self::evaluate_field_at_point(point + vec, design_elements, decay_constant))
             .sum::<Tensor>();
 
         sum / count as f32
     }
+
+    pub fn design_elements(&self) -> &[DesignElement] {
+        &self.design_elements
+    }
+
+    pub fn decay_constant(&self) -> f32 {
+        self.decay_constant
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum DesignElement {
     Grid {
         center: Point,
@@ -130,7 +181,7 @@ impl DesignElement {
                     })
                     .collect::<Vec<DesignElement>>();
 
-                TensorField::sum_elements(&lines, point, *decay_constant)
+                TensorField::sum_elements(point, &lines, *decay_constant)
             }
         }
     }
@@ -144,7 +195,7 @@ impl DesignElement {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct Eigenvectors {
     pub major: Vector2<f32>,
     pub minor: Vector2<f32>,
