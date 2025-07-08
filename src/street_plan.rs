@@ -76,12 +76,8 @@ pub fn prioritize_points(
     points
         .iter()
         .flat_map(|point| {
-            let tensor = TensorField::evaluate_field_at_point(
-                *point,
-                tensor_field.design_elements(),
-                tensor_field.decay_constant(),
-            );
-            if tensor.norm_squared() <= 0.0001 {
+            let eigenvectors = tensor_field.evaluate_smoothed_field_at_point(*point);
+            if eigenvectors.norm() <= 0.0001 {
                 None
             } else {
                 let city_center_priority = (-(city_center - point).magnitude()).exp();
@@ -161,12 +157,11 @@ fn sector_has_degenerate_point(
         for y_in_sector in 0..vertical_sector_size {
             let x = x_in_sector + x_sector * horizontal_sector_size;
             let y = y_in_sector + y_sector * vertical_sector_size;
-            let tensor = TensorField::evaluate_field_at_point(
-                Point::new(x as f32, y as f32),
-                tensor_field.design_elements(),
-                tensor_field.decay_constant(),
-            );
-            if tensor.norm_squared() <= 0.0001 {
+            if tensor_field
+                .evaluate_smoothed_field_at_point(Point::new(x as f32, y as f32))
+                .norm()
+                <= 0.0001
+            {
                 return true;
             }
         }
@@ -179,10 +174,8 @@ pub async fn trace_street_plan(
     tensor_field: &TensorField,
     starting_seed_count: u32,
     city_center: Point,
-    horizontal_sector_count: u32,
-    vertical_sector_count: u32,
-) -> (Vec<Vec<Point>>, usize) {
-    let temp_points = [
+) -> Vec<Vec<Point>> {
+    /* let temp_points = [
         (391.0, 113.0),
         (10.0, 470.0),
         (382.0, 472.0),
@@ -214,10 +207,10 @@ pub async fn trace_street_plan(
         (193.0, 146.0),
         (447.0, 224.0),
     ]
-    .map(|p| Point::new(p.0, p.1));
+    .map(|p| Point::new(p.0, p.1)); */
     let mut seed_points = prioritize_points(
-        &temp_points,
-        // &distribute_points(starting_seed_count),
+        // &temp_points,
+        &distribute_points(starting_seed_count),
         city_center,
         &tensor_field,
     );
@@ -282,8 +275,6 @@ pub async fn trace_street_plan(
         })
     }
 
-    let major_len = major_curves.len();
-
     let resampled_points: Result<Vec<Vec<Point>>, JoinError> = futures::future::join_all(
         major_curves
             .into_iter()
@@ -294,7 +285,7 @@ pub async fn trace_street_plan(
     .into_iter()
     .collect();
 
-    (resampled_points.unwrap(), major_len)
+    resampled_points.unwrap()
 }
 
 async fn trace_lanes(
@@ -373,19 +364,11 @@ fn trace(
         )
     };
 
-    let field_eval = |point: Point| {
-        TensorField::evaluate_smoothed_field_at_point(
-            point,
-            tensor_field.design_elements(),
-            tensor_field.decay_constant(),
-        )
-    };
-
     while !(seed.x < 0.0 || seed.y < 0.0 || seed.x > GRID_SIZE as f32 || seed.y > GRID_SIZE as f32)
     {
-        let tensor = field_eval(seed);
+        let tensor = tensor_field.evaluate_smoothed_field_at_point(seed);
 
-        if tensor.eigenvalues().is_none() || tensor.norm_squared() < 0.00001 {
+        if tensor.norm() < 0.0001 {
             break;
         }
 
@@ -399,7 +382,9 @@ fn trace(
                 follow_major_eigenvectors,
             )
             .normalize();
-        let k_2_eigenvectors = field_eval(clamp_vec_to_grid(seed + h / 2.0 * k_1)).eigenvectors();
+        let k_2_eigenvectors = tensor_field
+            .evaluate_smoothed_field_at_point(clamp_vec_to_grid(seed + h / 2.0 * k_1))
+            .eigenvectors();
         let k_2 = rev_factor
             * branchless_if(
                 clamp_vel(k_2_eigenvectors.major),
@@ -407,7 +392,9 @@ fn trace(
                 follow_major_eigenvectors,
             )
             .normalize();
-        let k_3_eigenvectors = field_eval(clamp_vec_to_grid(seed + h / 2.0 * k_2)).eigenvectors();
+        let k_3_eigenvectors = tensor_field
+            .evaluate_smoothed_field_at_point(clamp_vec_to_grid(seed + h / 2.0 * k_2))
+            .eigenvectors();
         let k_3 = rev_factor
             * branchless_if(
                 clamp_vel(k_3_eigenvectors.major),
@@ -415,7 +402,9 @@ fn trace(
                 follow_major_eigenvectors,
             )
             .normalize();
-        let k_4_eigenvectors = field_eval(clamp_vec_to_grid(seed + h * k_3)).eigenvectors();
+        let k_4_eigenvectors = tensor_field
+            .evaluate_smoothed_field_at_point(clamp_vec_to_grid(seed + h * k_3))
+            .eigenvectors();
         let k_4 = rev_factor
             * branchless_if(
                 clamp_vel(k_4_eigenvectors.major),

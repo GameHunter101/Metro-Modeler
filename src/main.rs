@@ -3,7 +3,7 @@ use core::f32;
 use image::{EncodableLayout, ImageBuffer};
 use nalgebra::Vector2;
 use street_plan::trace_street_plan;
-use tensor_field::{DesignElement, EvalEigenvectors, GRID_SIZE, TensorField};
+use tensor_field::{DesignElement, EvalEigenvectors, TensorField, GRID_SIZE};
 use v4::{
     builtin_components::mesh_component::{MeshComponent, VertexDescriptor},
     engine_support::texture_support::Texture,
@@ -11,7 +11,6 @@ use v4::{
 };
 use wgpu::vertex_attr_array;
 
-mod aabb;
 mod street_plan;
 mod tensor_field;
 
@@ -42,19 +41,12 @@ async fn main() {
 
     let city_center = *radial_element.center().as_ref().unwrap();
 
-    let mut tensor_field = TensorField::new(
+    let tensor_field = TensorField::new(
         vec![grid_element, radial_element, grid_element_2, grid_element_3],
         0.0004,
     );
-    let first_time = std::time::Instant::now();
-    tensor_field.fill_sync();
-    println!("Sync: {}", first_time.elapsed().as_millis());
 
-    let second_time = std::time::Instant::now();
-    tensor_field.fill_async().await;
-    println!("Async: {}", second_time.elapsed().as_millis());
-
-    let (trace, major_len) = trace_street_plan(&tensor_field, 30, city_center, 16, 16).await;
+    let trace = trace_street_plan(&tensor_field, 30, city_center).await;
 
     let mut engine = v4::V4::builder()
         .features(wgpu::Features::POLYGON_MODE_LINE)
@@ -72,13 +64,10 @@ async fn main() {
     let mut norm_tex = ImageBuffer::new(GRID_SIZE, GRID_SIZE);
 
     for (x, y, pix) in norm_tex.enumerate_pixels_mut() {
-        let val = (TensorField::evaluate_field_at_point(
-            Vector2::new(x as f32, y as f32),
-            tensor_field.design_elements(),
-            tensor_field.decay_constant(),
-        )
-        .norm()
-            > 0.01) as u8
+        let val = (tensor_field
+            .evaluate_smoothed_field_at_point(Vector2::new(x as f32, y as f32))
+            .norm()
+            > 0.0001) as u8
             * 255;
         *pix = image::Rgba([val, val, val, 100]);
     }
@@ -88,34 +77,6 @@ async fn main() {
     let queue = rendering_manager.queue();
 
     let vector_opacity = 0.4;
-
-    let bounding_boxes: Vec<aabb::BoundingBox> = trace[..major_len]
-        .iter()
-        .map(|trace| aabb::BoundingBox::new(trace))
-        .collect();
-
-    let bounding_box_points: Vec<Vec<Vertex>> = bounding_boxes
-        .iter()
-        .map(|bb| {
-            let positions = [
-                Vector2::new(bb.east(), bb.north()),
-                Vector2::new(bb.east(), bb.south()),
-                Vector2::new(bb.west(), bb.south()),
-                Vector2::new(bb.west(), bb.north()),
-                Vector2::new(bb.east(), bb.north()),
-            ];
-
-            positions
-                .map(|pos| {
-                    let vector = normalize_vector(pos);
-                    Vertex {
-                        pos: [vector.x, vector.y, 0.01],
-                        col: [1.0, 0.0, 0.0, 1.0],
-                    }
-                })
-                .to_vec()
-        })
-        .collect();
 
     scene! {
         scene: visualizer,
@@ -137,7 +98,7 @@ async fn main() {
                     vertices: vec![
                         (0..GRID_SIZE / sample_factor).flat_map(|x| (0..GRID_SIZE / sample_factor).flat_map(|y| {
                             let point = Vector2::new(x as f32 * sample_factor as f32, y as f32 * sample_factor as f32);
-                            let tensor = TensorField::evaluate_field_at_point(point, tensor_field.design_elements(), tensor_field.decay_constant());
+                            let tensor = tensor_field.evaluate_smoothed_field_at_point(point);
                             let eigenvectors = tensor.eigenvectors();
                             let maj = eigenvectors.major.normalize() * (sample_factor - 1) as f32;
                             let min = eigenvectors.minor.normalize() * (sample_factor - 1) as f32;
@@ -151,26 +112,6 @@ async fn main() {
                         }).collect::<Vec<_>>()).collect()
                     ],
                     enabled_models: vec![(0, None)]
-                ),
-            ]
-        },
-        "bounding_boxes" = {
-            material: {
-                pipeline: {
-                    vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
-                    fragment_shader_path: "./shaders/visualizer_fragment.wgsl",
-                    vertex_layouts: [Vertex::vertex_layout()],
-                    uses_camera: false,
-                    geometry_details: {
-                        topology: wgpu::PrimitiveTopology::LineStrip,
-                        polygon_mode: wgpu::PolygonMode::Line,
-                    },
-                },
-            },
-            components: [
-                MeshComponent(
-                    vertices: bounding_box_points,
-                    enabled_models: (0..major_len).map(|i| (i, None)).collect()
                 ),
             ]
         },

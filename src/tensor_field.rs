@@ -5,53 +5,38 @@ pub const GRID_SIZE: u32 = 512;
 pub type Tensor = Matrix2<f32>;
 pub type Point = Vector2<f32>;
 
+#[allow(unused)]
 #[derive(Debug)]
 pub struct TensorField {
-    grid: Box<[Eigenvectors]>,
+    grid: Box<[Tensor]>,
     design_elements: Vec<DesignElement>,
     decay_constant: f32,
 }
 
+#[allow(unused)]
 impl TensorField {
     pub fn new(design_elements: Vec<DesignElement>, decay_constant: f32) -> TensorField {
-        TensorField {
-            grid: vec![Eigenvectors::default(); (GRID_SIZE * GRID_SIZE) as usize]
-                .into_boxed_slice(),
-            design_elements,
-            decay_constant,
-        }
-    }
+        let mut grid = vec![Tensor::default(); (GRID_SIZE * GRID_SIZE) as usize].into_boxed_slice();
 
-    pub fn fill_sync(&mut self) {
-        for row in 0..GRID_SIZE as usize {
-            for col in 0..GRID_SIZE as usize {
-                self.grid[row * GRID_SIZE as usize + col] = Self::evaluate_smoothed_field_at_point(
-                    Point::new(col as f32, row as f32),
-                    &self.design_elements,
-                    self.decay_constant,
-                )
-                .eigenvectors();
-            }
-        }
-    }
-
-    pub async fn fill_async(&mut self) {
-        let design_elements = &self.design_elements;
-        let decay_constant = self.decay_constant;
+        let design_elements_ref = &design_elements;
         async_scoped::TokioScope::scope_and_block(|scope| {
-            for (row, chunk) in self.grid.chunks_mut(GRID_SIZE as usize).enumerate() {
+            for (row, chunk) in grid.chunks_mut(GRID_SIZE as usize).enumerate() {
                 scope.spawn(async move {
                     for col in 0..GRID_SIZE as usize {
-                        chunk[col] = Self::evaluate_smoothed_field_at_point(
+                        chunk[col] = Self::calculate_smoothed_field_at_point(
                             Point::new(col as f32, row as f32),
-                            design_elements,
+                            design_elements_ref,
                             decay_constant,
                         )
-                        .eigenvectors()
                     }
                 });
             }
         });
+        TensorField {
+            grid,
+            design_elements,
+            decay_constant,
+        }
     }
 
     pub fn add_design_element(&mut self, design_element: DesignElement) {
@@ -80,7 +65,7 @@ impl TensorField {
             .sum()
     }
 
-    pub fn evaluate_field_at_point(
+    fn calculate_field_at_point(
         point: Point,
         design_elements: &[DesignElement],
         decay_constant: f32,
@@ -88,12 +73,12 @@ impl TensorField {
         Self::sum_elements(point, design_elements, decay_constant)
     }
 
-    pub fn evaluate_smoothed_field_at_point(
+    fn calculate_smoothed_field_at_point(
         point: Point,
         design_elements: &[DesignElement],
         decay_constant: f32,
     ) -> Tensor {
-        let mut sum = Self::evaluate_field_at_point(point, design_elements, decay_constant);
+        let mut sum = Self::calculate_field_at_point(point, design_elements, decay_constant);
         let mut count = 1;
         let mut neighbors = Vec::new();
         if point.x >= 1.0 {
@@ -114,10 +99,33 @@ impl TensorField {
 
         sum += neighbors
             .into_iter()
-            .map(|vec| Self::evaluate_field_at_point(point + vec, design_elements, decay_constant))
+            .map(|vec| Self::calculate_field_at_point(point + vec, design_elements, decay_constant))
             .sum::<Tensor>();
 
         sum / count as f32
+    }
+
+    pub fn evaluate_smoothed_field_at_point(&self, point: Point) -> Tensor {
+        let x_floor = (point.x as usize).min(GRID_SIZE as usize - 1);
+        let x_ceil = (point.x.ceil() as usize).min(GRID_SIZE as usize - 1);
+        let y_floor = (point.y as usize).min(GRID_SIZE as usize - 1);
+        let y_ceil = (point.y.ceil() as usize).min(GRID_SIZE as usize - 1);
+
+        let top_left = self.grid[y_ceil * GRID_SIZE as usize + x_floor];
+        let top_right = self.grid[y_ceil * GRID_SIZE as usize + x_ceil];
+
+        let top_lerp = Self::lerp(top_left, top_right, point.x.fract());
+
+        let bottom_left = self.grid[y_floor * GRID_SIZE as usize + x_floor];
+        let bottom_right = self.grid[y_floor * GRID_SIZE as usize + x_ceil];
+
+        let bottom_lerp = Self::lerp(bottom_left, bottom_right, point.x.fract());
+
+        Self::lerp(bottom_lerp, top_lerp, point.y.fract())
+    }
+
+    fn lerp(a: Tensor, b: Tensor, t: f32) -> Tensor {
+        a * (1.0 - t) + b * t
     }
 
     pub fn design_elements(&self) -> &[DesignElement] {
@@ -211,21 +219,22 @@ impl EvalEigenvectors for Tensor {
             dbg!(self);
         }
         let eigenvalues = self.eigenvalues().unwrap();
-        let vectors: Vec<Vector2<f32>> = eigenvalues
-            .into_iter()
-            .map(|&eigenvalue| {
-                let tensor = self - eigenvalue * Tensor::identity();
-                let [a, b]: [f32; 2] = tensor.row(0).into_owned().into();
-                let [c, d]: [f32; 2] = tensor.row(1).into_owned().into();
-                let new_b = b / a;
-                let new_d = d - b / a * c;
-                if new_d <= 0.000001 {
-                    Vector2::new(-new_b, 1.0)
-                } else {
-                    Vector2::new(1.0, 1.0)
-                }
-            })
-            .collect();
+        let calc_eigenvector = |eigenvalue: f32| {
+            let tensor = self - eigenvalue * Tensor::identity();
+            let [a, b]: [f32; 2] = tensor.row(0).into_owned().into();
+            let [c, d]: [f32; 2] = tensor.row(1).into_owned().into();
+            let new_b = b / a;
+            let new_d = d - b / a * c;
+            if new_d <= 0.000001 {
+                Vector2::new(-new_b, 1.0)
+            } else {
+                Vector2::new(1.0, 1.0)
+            }
+        };
+        let vectors: [Vector2<f32>; 2] = [
+            calc_eigenvector(eigenvalues[0]),
+            calc_eigenvector(eigenvalues[1]),
+        ];
         if eigenvalues[0] > 0.0 {
             Eigenvectors {
                 major: vectors[0],
