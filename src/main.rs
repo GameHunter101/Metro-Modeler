@@ -41,6 +41,8 @@ async fn main() {
 
     let city_center = *radial_element.center().as_ref().unwrap();
 
+    let start_time = std::time::Instant::now();
+
     let tensor_field = TensorField::new(
         vec![grid_element, radial_element, grid_element_2, grid_element_3],
         0.0004,
@@ -110,6 +112,9 @@ async fn main() {
     .collect();
 
     let minor_network = minor_network.unwrap();
+
+    println!("{}", start_time.elapsed().as_millis() as f32 / 1000.0);
+
 
     let mut engine = v4::V4::builder()
         .features(wgpu::Features::POLYGON_MODE_LINE)

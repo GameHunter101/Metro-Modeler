@@ -183,11 +183,48 @@ pub async fn trace_street_plan(
     iter_count: usize,
 ) -> (Vec<Vec<ControlPoint>>, Vec<Vec<ControlPoint>>) {
     let mut seed_points = match seeds {
-        TraceSeeds::Random(starting_seed_count) => prioritize_points(
-            &distribute_points(starting_seed_count),
-            city_center,
-            &tensor_field,
-        ),
+        TraceSeeds::Random(starting_seed_count) => {
+            let temp_points = [
+                (391.0, 113.0),
+                (10.0, 470.0),
+                (382.0, 472.0),
+                (61.0, 152.0),
+                (413.0, 291.0),
+                (191.0, 298.0),
+                (0.0, 303.0),
+                (147.0, 0.0),
+                (304.0, 294.0),
+                (298.0, 41.0),
+                (230.0, 509.0),
+                (502.0, 416.0),
+                (127.0, 205.0),
+                (285.0, 162.0),
+                (459.0, 40.0),
+                (299.0, 436.0),
+                (121.0, 472.0),
+                (508.0, 493.0),
+                (470.0, 151.0),
+                (214.0, 413.0),
+                (364.0, 355.0),
+                (171.0, 63.0),
+                (355.0, 191.0),
+                (274.0, 355.0),
+                (66.0, 336.0),
+                (230.0, 65.0),
+                (30.0, 31.0),
+                (223.0, 12.0),
+                (193.0, 146.0),
+                (447.0, 224.0),
+            ]
+            .map(|p| Point::new(p.0, p.1));
+
+            prioritize_points(
+                // &distribute_points(starting_seed_count),
+                &temp_points,
+                city_center,
+                &tensor_field,
+            )
+        }
         TraceSeeds::Specific(seed_points) => BinaryHeap::from(seed_points),
     };
 
@@ -213,7 +250,11 @@ pub async fn trace_street_plan(
                 d_sep.clone(),
                 follow_major_eigenvectors,
                 200.0,
-                false,
+                if follow_major_eigenvectors {
+                    &major_curves
+                } else {
+                    &minor_curves
+                },
             )
             .await;
 
@@ -263,7 +304,7 @@ async fn trace_lanes(
     d_sep: impl Fn(Point) -> f32 + Send + Clone,
     follow_major_eigenvectors: bool,
     max_len: f32,
-    reverse: bool,
+    previous_curves: &[HermiteCurve],
 ) -> Vec<TraceOutput> {
     let (_, unordered_traces) = async_scoped::TokioScope::scope_and_block(|scope| {
         for (index, seed) in seeds {
@@ -278,7 +319,7 @@ async fn trace_lanes(
                         d_sep,
                         follow_major_eigenvectors,
                         max_len,
-                        reverse,
+                        previous_curves,
                     ),
                 )
             });
@@ -315,13 +356,16 @@ fn trace(
     d_sep: impl Fn(Point) -> f32,
     follow_major_eigenvectors: bool,
     max_len: f32,
-    reverse: bool,
+    previous_curves: &[HermiteCurve],
 ) -> TraceOutput {
     let origin = seed;
     let mut seed = seed;
     let mut path = vec![seed];
     let mut accumulated_distance = 0.0;
     let mut distance_since_last_seed = 0.0;
+    let mut closest_distance_to_curves =
+        distance_squared_to_nearest_curve_approximation(seed, previous_curves).sqrt() - d_sep(seed);
+    let mut distance_since_last_distance_check = 0.0;
     let mut new_seeds = vec![];
     let mut steps = 0;
 
@@ -333,6 +377,10 @@ fn trace(
         )
     };
 
+    if closest_distance_to_curves <= 0.0 {
+        return TraceOutput::default();
+    }
+
     while !(seed.x < 0.0 || seed.y < 0.0 || seed.x > GRID_SIZE as f32 || seed.y > GRID_SIZE as f32)
     {
         let tensor = tensor_field.evaluate_smoothed_field_at_point(seed);
@@ -341,46 +389,40 @@ fn trace(
             break;
         }
 
-        let rev_factor = -2.0 * (reverse as i32 as f32 - 0.5);
-
         let k_1_eigenvectors = tensor.eigenvectors();
-        let k_1 = rev_factor
-            * branchless_if(
-                clamp_vel(k_1_eigenvectors.major),
-                clamp_vel(k_1_eigenvectors.minor),
-                follow_major_eigenvectors,
-            )
-            .normalize();
+        let k_1 = branchless_if(
+            clamp_vel(k_1_eigenvectors.major),
+            clamp_vel(k_1_eigenvectors.minor),
+            follow_major_eigenvectors,
+        )
+        .normalize();
         let k_2_eigenvectors = tensor_field
             .evaluate_smoothed_field_at_point(clamp_vec_to_grid(seed + h / 2.0 * k_1))
             .eigenvectors();
-        let k_2 = rev_factor
-            * branchless_if(
-                clamp_vel(k_2_eigenvectors.major),
-                clamp_vel(k_2_eigenvectors.minor),
-                follow_major_eigenvectors,
-            )
-            .normalize();
+        let k_2 = branchless_if(
+            clamp_vel(k_2_eigenvectors.major),
+            clamp_vel(k_2_eigenvectors.minor),
+            follow_major_eigenvectors,
+        )
+        .normalize();
         let k_3_eigenvectors = tensor_field
             .evaluate_smoothed_field_at_point(clamp_vec_to_grid(seed + h / 2.0 * k_2))
             .eigenvectors();
-        let k_3 = rev_factor
-            * branchless_if(
-                clamp_vel(k_3_eigenvectors.major),
-                clamp_vel(k_3_eigenvectors.minor),
-                follow_major_eigenvectors,
-            )
-            .normalize();
+        let k_3 = branchless_if(
+            clamp_vel(k_3_eigenvectors.major),
+            clamp_vel(k_3_eigenvectors.minor),
+            follow_major_eigenvectors,
+        )
+        .normalize();
         let k_4_eigenvectors = tensor_field
             .evaluate_smoothed_field_at_point(clamp_vec_to_grid(seed + h * k_3))
             .eigenvectors();
-        let k_4 = rev_factor
-            * branchless_if(
-                clamp_vel(k_4_eigenvectors.major),
-                clamp_vel(k_4_eigenvectors.minor),
-                follow_major_eigenvectors,
-            )
-            .normalize();
+        let k_4 = branchless_if(
+            clamp_vel(k_4_eigenvectors.major),
+            clamp_vel(k_4_eigenvectors.minor),
+            follow_major_eigenvectors,
+        )
+        .normalize();
 
         let m = 1.0 / 6.0 * k_1 + 1.0 / 3.0 * k_2 + 1.0 / 3.0 * k_3 + 1.0 / 6.0 * k_4;
 
@@ -389,12 +431,25 @@ fn trace(
 
         accumulated_distance += dist;
         distance_since_last_seed += dist;
+        distance_since_last_distance_check += dist;
 
         if distance_since_last_seed >= d_sep(new_pos) {
             distance_since_last_seed = 0.0;
             new_seeds.push((new_pos, accumulated_distance));
         }
         seed = new_pos;
+
+        if distance_since_last_distance_check >= closest_distance_to_curves {
+            let new_closest_distance =
+                distance_squared_to_nearest_curve_approximation(new_pos, previous_curves).sqrt()
+                    - d_sep(new_pos);
+            if new_closest_distance <= 0.0 {
+                break;
+            } else {
+                closest_distance_to_curves = new_closest_distance;
+                distance_since_last_distance_check = 0.0;
+            }
+        }
 
         if h < 1.0 {
             if steps as f32 % (1.0 / h) <= 0.001 {
@@ -413,7 +468,11 @@ fn trace(
         .map(|(e, f)| (e, f / accumulated_distance))
         .collect();
 
-    TraceOutput { path, new_seeds }
+    if path.len() < 2 {
+        TraceOutput::default()
+    } else {
+        TraceOutput { path, new_seeds }
+    }
 }
 
 fn branchless_if<T: std::ops::Mul<f32, Output = T> + std::ops::Add<T, Output = T>>(
@@ -466,9 +525,15 @@ async fn smooth_lanes(
 ) -> Result<Vec<SmoothedCurve>, JoinError> {
     let h_square = h * h;
     let (_, res) = async_scoped::TokioScope::scope_and_block(|scope| {
-        for TraceOutput { path, new_seeds } in traces {
+        for TraceOutput { path, new_seeds } in traces
+            .into_iter()
+            .filter(|TraceOutput { path, .. }| !path.is_empty())
+        {
             scope.spawn(async move {
                 let smoothed_path = smooth_path(path.clone(), alpha, beta);
+                if smoothed_path.len() == 1 {
+                    println!("Prev: {}", path.clone().len());
+                }
 
                 let mut control_points_indices: Vec<usize> =
                     highest_curvature_points(&smoothed_path, point_side_padding);
@@ -717,7 +782,7 @@ fn distance_squared_to_nearest_curve_approximation(
                 .unwrap()
         })
         .reduce(|acc, e| if e < acc { e } else { acc })
-        .unwrap()
+        .unwrap_or(f32::MAX)
 }
 
 fn project_vector(subject: Point, target: Vector2<f32>) -> Point {
