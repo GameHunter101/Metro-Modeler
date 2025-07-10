@@ -2,8 +2,8 @@ use core::f32;
 
 use image::{EncodableLayout, ImageBuffer};
 use nalgebra::Vector2;
-use street_plan::trace_street_plan;
-use tensor_field::{DesignElement, EvalEigenvectors, TensorField, GRID_SIZE};
+use street_plan::{SeedPoint, resample_curve, trace_street_plan};
+use tensor_field::{DesignElement, EvalEigenvectors, GRID_SIZE, Point, TensorField};
 use v4::{
     builtin_components::mesh_component::{MeshComponent, VertexDescriptor},
     engine_support::texture_support::Texture,
@@ -46,7 +46,70 @@ async fn main() {
         0.0004,
     );
 
-    let trace = trace_street_plan(&tensor_field, 30, city_center).await;
+    let (major_network_major_curves, major_network_minor_curves) = trace_street_plan(
+        &tensor_field,
+        street_plan::TraceSeeds::Random(30),
+        city_center,
+        30.0,
+        5,
+    )
+    .await;
+
+    let minor_network_seed_points: Vec<SeedPoint> = major_network_major_curves
+        .iter()
+        .map(|curve| {
+            (0..curve.len() - 1)
+                .map(|i| SeedPoint {
+                    seed: (curve[i].position + curve[i + 1].position) / 2.0,
+                    priority: 0.0,
+                    follow_major_eigenvectors: false,
+                })
+                .collect::<Vec<_>>()
+        })
+        .chain(major_network_minor_curves.iter().map(|curve| {
+            (0..curve.len() - 1)
+                .map(|i| SeedPoint {
+                    seed: (curve[i].position + curve[i + 1].position) / 2.0,
+                    priority: 0.0,
+                    follow_major_eigenvectors: true,
+                })
+                .collect::<Vec<_>>()
+        }))
+        .flatten()
+        .collect();
+
+    let major_network: Result<Vec<Vec<Point>>, tokio::task::JoinError> = futures::future::join_all(
+        major_network_major_curves
+            .into_iter()
+            .chain(major_network_minor_curves)
+            .map(|curve| tokio::spawn(async { resample_curve(curve, 20) })),
+    )
+    .await
+    .into_iter()
+    .collect();
+
+    let major_network = major_network.unwrap();
+
+    let (minor_network_major_curves, minor_network_minor_curves) = trace_street_plan(
+        &tensor_field,
+        street_plan::TraceSeeds::Specific(minor_network_seed_points),
+        city_center,
+        5.0,
+        3,
+    )
+    .await;
+
+    let minor_network: Result<Vec<Vec<Point>>, tokio::task::JoinError> = futures::future::join_all(
+        minor_network_major_curves
+            .into_iter()
+            .chain(minor_network_minor_curves)
+            .map(|curve| tokio::spawn(async { resample_curve(curve, 20) })),
+    )
+    .await
+    .into_iter()
+    .collect();
+
+    let minor_network = minor_network.unwrap();
 
     let mut engine = v4::V4::builder()
         .features(wgpu::Features::POLYGON_MODE_LINE)
@@ -69,14 +132,14 @@ async fn main() {
             .norm()
             > 0.0001) as u8
             * 255;
-        *pix = image::Rgba([val, val, val, 100]);
+        *pix = image::Rgba([val, val, val, 50]);
     }
 
     let rendering_manager = engine.rendering_manager();
     let device = rendering_manager.device();
     let queue = rendering_manager.queue();
 
-    let vector_opacity = 0.4;
+    let vector_opacity = 0.2;
 
     scene! {
         scene: visualizer,
@@ -164,7 +227,7 @@ async fn main() {
                 )
             ]
         },
-        "path" = {
+        "major_network" = {
             material: {
                 pipeline: {
                     vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
@@ -174,13 +237,14 @@ async fn main() {
                     geometry_details: {
                         topology: wgpu::PrimitiveTopology::LineStrip,
                         polygon_mode: wgpu::PolygonMode::Line,
-                    }
+                    },
+                    ident: "network_pipeline",
                 }
             },
             components: [
                 MeshComponent(
                     vertices:
-                        trace.iter().map(|arr| {
+                        major_network.iter().map(|arr| {
                             arr.iter().map(|vec| {
                                     Vertex {
                                         pos: [
@@ -192,7 +256,30 @@ async fn main() {
                                     }
                             }).collect::<Vec<_>>()
                         }).collect(),
-                    enabled_models: trace.iter().enumerate().map(|(i, _)| (i, None)).collect()
+                    enabled_models: major_network.iter().enumerate().map(|(i, _)| (i, None)).collect()
+                )
+            ]
+        },
+        "minor_network" = {
+            material: {
+                pipeline: ident("network_pipeline"),
+            },
+            components: [
+                MeshComponent(
+                    vertices:
+                        minor_network.iter().map(|arr| {
+                            arr.iter().map(|vec| {
+                                    Vertex {
+                                        pos: [
+                                            2.0 * vec.x / GRID_SIZE as f32 - 1.0,
+                                            2.0 * vec.y / GRID_SIZE as f32 - 1.0,
+                                            0.0,
+                                        ],
+                                        col: [1.0, 0.0, 0.0, 1.0]
+                                    }
+                            }).collect::<Vec<_>>()
+                        }).collect(),
+                    enabled_models: minor_network.iter().enumerate().map(|(i, _)| (i, None)).collect()
                 )
             ]
         }

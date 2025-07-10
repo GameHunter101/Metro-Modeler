@@ -170,58 +170,36 @@ fn sector_has_degenerate_point(
     return false;
 }
 
+pub enum TraceSeeds {
+    Random(u32),
+    Specific(Vec<SeedPoint>),
+}
+
 pub async fn trace_street_plan(
     tensor_field: &TensorField,
-    starting_seed_count: u32,
+    seeds: TraceSeeds,
     city_center: Point,
-) -> Vec<Vec<Point>> {
-    /* let temp_points = [
-        (391.0, 113.0),
-        (10.0, 470.0),
-        (382.0, 472.0),
-        (61.0, 152.0),
-        (413.0, 291.0),
-        (191.0, 298.0),
-        (0.0, 303.0),
-        (147.0, 0.0),
-        (304.0, 294.0),
-        (298.0, 41.0),
-        (230.0, 509.0),
-        (502.0, 416.0),
-        (127.0, 205.0),
-        (285.0, 162.0),
-        (459.0, 40.0),
-        (299.0, 436.0),
-        (121.0, 472.0),
-        (508.0, 493.0),
-        (470.0, 151.0),
-        (214.0, 413.0),
-        (364.0, 355.0),
-        (171.0, 63.0),
-        (355.0, 191.0),
-        (274.0, 355.0),
-        (66.0, 336.0),
-        (230.0, 65.0),
-        (30.0, 31.0),
-        (223.0, 12.0),
-        (193.0, 146.0),
-        (447.0, 224.0),
-    ]
-    .map(|p| Point::new(p.0, p.1)); */
-    let mut seed_points = prioritize_points(
-        // &temp_points,
-        &distribute_points(starting_seed_count),
-        city_center,
-        &tensor_field,
-    );
+    d_sep: f32,
+    iter_count: usize,
+) -> (Vec<Vec<ControlPoint>>, Vec<Vec<ControlPoint>>) {
+    let mut seed_points = match seeds {
+        TraceSeeds::Random(starting_seed_count) => prioritize_points(
+            &distribute_points(starting_seed_count),
+            city_center,
+            &tensor_field,
+        ),
+        TraceSeeds::Specific(seed_points) => BinaryHeap::from(seed_points),
+    };
 
     let mut major_curves = Vec::new();
     let mut minor_curves = Vec::new();
 
-    for i in 0..5 {
+    let d_sep_val = d_sep;
+
+    for i in 0..iter_count {
         pollster::block_on(async {
             let h = 0.2;
-            let d_sep = 20.0;
+            let d_sep = |point: Point| d_sep_val/*  + (point - city_center).norm() / GRID_SIZE as f32 * 15.0 */;
             let follow_major_eigenvectors = (i % 2) == 0;
 
             let traces = trace_lanes(
@@ -232,7 +210,7 @@ pub async fn trace_street_plan(
                     .collect::<Vec<_>>(),
                 tensor_field,
                 h,
-                d_sep,
+                d_sep.clone(),
                 follow_major_eigenvectors,
                 200.0,
                 false,
@@ -254,7 +232,7 @@ pub async fn trace_street_plan(
                     &minor_curves
                 },
                 d_sep,
-                d_sep * 2.0,
+                d_sep_val * 2.0,
             )
             .into_iter()
             .unzip();
@@ -275,30 +253,21 @@ pub async fn trace_street_plan(
         })
     }
 
-    let resampled_points: Result<Vec<Vec<Point>>, JoinError> = futures::future::join_all(
-        major_curves
-            .into_iter()
-            .chain(minor_curves)
-            .map(|curve| tokio::spawn(async { resample_curve(curve, 20) })),
-    )
-    .await
-    .into_iter()
-    .collect();
-
-    resampled_points.unwrap()
+    (major_curves, minor_curves)
 }
 
 async fn trace_lanes(
     seeds: Vec<(usize, Point)>,
     tensor_field: &TensorField,
     h: f32,
-    d_sep: f32,
+    d_sep: impl Fn(Point) -> f32 + Send + Clone,
     follow_major_eigenvectors: bool,
     max_len: f32,
     reverse: bool,
 ) -> Vec<TraceOutput> {
     let (_, unordered_traces) = async_scoped::TokioScope::scope_and_block(|scope| {
         for (index, seed) in seeds {
+            let d_sep = d_sep.clone();
             scope.spawn(async move {
                 (
                     index,
@@ -343,7 +312,7 @@ fn trace(
     tensor_field: &TensorField,
     seed: Point,
     h: f32,
-    d_sep: f32,
+    d_sep: impl Fn(Point) -> f32,
     follow_major_eigenvectors: bool,
     max_len: f32,
     reverse: bool,
@@ -421,7 +390,7 @@ fn trace(
         accumulated_distance += dist;
         distance_since_last_seed += dist;
 
-        if distance_since_last_seed >= d_sep {
+        if distance_since_last_seed >= d_sep(new_pos) {
             distance_since_last_seed = 0.0;
             new_seeds.push((new_pos, accumulated_distance));
         }
@@ -475,9 +444,9 @@ fn clamp_vec_to_grid(vec: Vector2<f32>) -> Vector2<f32> {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ControlPoint {
-    position: Point,
-    velocity: Vector2<f32>,
+pub struct ControlPoint {
+    pub position: Point,
+    pub velocity: Vector2<f32>,
 }
 
 type HermiteCurve = Vec<ControlPoint>;
@@ -593,7 +562,7 @@ pub fn point_second_deriv(point_index: usize, path: &[Point]) -> Vector2<f32> {
         - point_first_deriv(point_index - 1, path).normalize()
 }
 
-fn resample_curve(control_points: Vec<ControlPoint>, points_per_spline: i32) -> Vec<Point> {
+pub fn resample_curve(control_points: Vec<ControlPoint>, points_per_spline: i32) -> Vec<Point> {
     let sampler = |p_0: Point, p_1: Point, m_0: Vector2<f32>, m_1: Vector2<f32>| -> Vec<Point> {
         (0..=points_per_spline)
             .map(|i| {
@@ -645,10 +614,9 @@ pub fn highest_curvature_points(path: &[Point], point_padding_per_side: usize) -
 fn clip_pass(
     curve_paths: Vec<SmoothedCurve>,
     previous_curves: &[HermiteCurve],
-    d_sep: f32,
+    d_sep: impl Fn(Point) -> f32,
     min_length: f32,
 ) -> Vec<(HermiteCurve, Vec<Point>)> {
-    let d_sep_squared = d_sep * d_sep;
     (1..curve_paths.len())
         .flat_map(|curve_index| {
             let SmoothedCurve {
@@ -665,7 +633,7 @@ fn clip_pass(
             if distance_squared_to_nearest_curve_approximation(
                 current_curve[0].position,
                 &prev_curves_as_hermite,
-            ) < (0.85 * d_sep_squared)
+            ) < (0.85 * d_sep(current_curve[0].position) * d_sep(current_curve[0].position))
             {
                 return None;
             }
@@ -681,8 +649,9 @@ fn clip_pass(
                 .collect();
 
             let mut clipped_index = 0;
-            for dist_squared in &control_point_distances_squared {
-                if *dist_squared >= d_sep_squared {
+            for (i, dist_squared) in control_point_distances_squared.iter().enumerate() {
+                let d_sep_val = d_sep(current_curve[i].position);
+                if *dist_squared >= d_sep_val * d_sep_val {
                     clipped_index += 1;
                 } else {
                     break;
