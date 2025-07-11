@@ -3,7 +3,7 @@ use std::collections::BinaryHeap;
 
 use nalgebra::Vector2;
 use rand::Rng;
-use tokio::task::JoinError;
+use rayon::prelude::*;
 
 use crate::tensor_field::{EvalEigenvectors, GRID_SIZE, Point, TensorField};
 
@@ -175,7 +175,7 @@ pub enum TraceSeeds {
     Specific(Vec<SeedPoint>),
 }
 
-pub async fn trace_street_plan(
+pub fn trace_street_plan(
     tensor_field: &TensorField,
     seeds: TraceSeeds,
     city_center: Point,
@@ -234,97 +234,93 @@ pub async fn trace_street_plan(
     let d_sep_val = d_sep;
 
     for i in 0..iter_count {
-        pollster::block_on(async {
-            let h = 0.2;
-            let d_sep = |point: Point| d_sep_val/*  + (point - city_center).norm() / GRID_SIZE as f32 * 15.0 */;
-            let follow_major_eigenvectors = (i % 2) == 0;
+        let h = 0.2;
+        let d_sep = |_point: Point| d_sep_val/*  + (point - city_center).norm() / GRID_SIZE as f32 * 15.0 */;
+        let follow_major_eigenvectors = (i % 2) == 0;
 
-            let traces = trace_lanes(
-                seed_points
-                    .iter()
-                    .enumerate()
-                    .map(|(i, seed)| (i, seed.seed))
-                    .collect::<Vec<_>>(),
-                tensor_field,
-                h,
-                d_sep.clone(),
-                follow_major_eigenvectors,
-                200.0,
-                if follow_major_eigenvectors {
-                    &major_curves
-                } else {
-                    &minor_curves
-                },
-            )
-            .await;
-
-            let pre: usize = traces
+        let traces = trace_lanes(
+            seed_points
                 .iter()
-                .map(|TraceOutput { new_seeds, .. }| new_seeds.len())
-                .sum();
-
-            let curve_paths = smooth_lanes(traces, 0.03, 0.3, 20, h, 0.7).await.unwrap();
-
-            let (clipped_paths, new_seeds): (Vec<HermiteCurve>, Vec<Vec<Point>>) = clip_pass(
-                curve_paths,
-                if follow_major_eigenvectors {
-                    &major_curves
-                } else {
-                    &minor_curves
-                },
-                d_sep,
-                d_sep_val * 2.0,
-            )
-            .into_iter()
-            .unzip();
-
-            println!("Pre: {pre}, post: {}", new_seeds.len());
-
-            seed_points.extend(new_seeds.into_iter().flatten().map(|seed| SeedPoint {
-                seed,
-                priority: 0.0,
-                follow_major_eigenvectors,
-            }));
-
+                .enumerate()
+                .map(|(i, seed)| (i, seed.seed))
+                .collect::<Vec<_>>(),
+            tensor_field,
+            h,
+            d_sep.clone(),
+            follow_major_eigenvectors,
+            200.0,
             if follow_major_eigenvectors {
-                major_curves.extend(clipped_paths);
+                &major_curves
             } else {
-                minor_curves.extend(clipped_paths);
-            }
-        })
+                &minor_curves
+            },
+        );
+
+        let pre: usize = traces
+            .iter()
+            .map(|TraceOutput { new_seeds, .. }| new_seeds.len())
+            .sum();
+
+        let curve_paths = smooth_lanes(traces, 0.03, 0.3, 20, h, 0.7);
+
+        let (clipped_paths, new_seeds): (Vec<HermiteCurve>, Vec<Vec<Point>>) = clip_pass(
+            curve_paths,
+            if follow_major_eigenvectors {
+                &major_curves
+            } else {
+                &minor_curves
+            },
+            d_sep,
+            d_sep_val * 2.0,
+        )
+        .into_iter()
+        .unzip();
+
+        println!("Pre: {pre}, post: {}", new_seeds.len());
+
+        seed_points.extend(new_seeds.into_iter().flatten().map(|seed| SeedPoint {
+            seed,
+            priority: 0.0,
+            follow_major_eigenvectors,
+        }));
+
+        if follow_major_eigenvectors {
+            major_curves.extend(clipped_paths);
+        } else {
+            minor_curves.extend(clipped_paths);
+        }
     }
 
     (major_curves, minor_curves)
 }
 
-async fn trace_lanes(
+fn trace_lanes(
     seeds: Vec<(usize, Point)>,
     tensor_field: &TensorField,
     h: f32,
-    d_sep: impl Fn(Point) -> f32 + Send + Clone,
+    d_sep: impl Fn(Point) -> f32 + Send + Sync + Clone,
     follow_major_eigenvectors: bool,
     max_len: f32,
     previous_curves: &[HermiteCurve],
 ) -> Vec<TraceOutput> {
-    let (_, unordered_traces) = async_scoped::TokioScope::scope_and_block(|scope| {
-        for (index, seed) in seeds {
+    let unordered_traces: Vec<(usize, TraceOutput)> = seeds
+        .into_par_iter()
+        .map(|(index, seed)| {
             let d_sep = d_sep.clone();
-            scope.spawn(async move {
-                (
-                    index,
-                    trace(
-                        tensor_field,
-                        seed,
-                        h,
-                        d_sep,
-                        follow_major_eigenvectors,
-                        max_len,
-                        previous_curves,
-                    ),
-                )
-            });
-        }
-    });
+            (
+                index,
+                trace(
+                    tensor_field,
+                    seed,
+                    h,
+                    d_sep,
+                    follow_major_eigenvectors,
+                    max_len,
+                    previous_curves,
+                ),
+            )
+        })
+        .collect();
 
     let mut ordered_traces = vec![
         TraceOutput {
@@ -334,10 +330,8 @@ async fn trace_lanes(
         unordered_traces.len()
     ];
 
-    for trace_res in unordered_traces {
-        if let Ok((index, trace_output)) = trace_res {
-            ordered_traces[index] = trace_output;
-        }
+    for (index, trace_output) in unordered_traces {
+        ordered_traces[index] = trace_output;
     }
 
     ordered_traces
@@ -515,57 +509,52 @@ struct SmoothedCurve {
     new_seeds: Vec<(Point, f32)>,
 }
 
-async fn smooth_lanes(
+fn smooth_lanes(
     traces: Vec<TraceOutput>,
     alpha: f32,
     beta: f32,
     point_side_padding: usize,
     h: f32,
     blend_factor: f32,
-) -> Result<Vec<SmoothedCurve>, JoinError> {
+) -> Vec<SmoothedCurve> {
     let h_square = h * h;
-    let (_, res) = async_scoped::TokioScope::scope_and_block(|scope| {
-        for TraceOutput { path, new_seeds } in traces
-            .into_iter()
-            .filter(|TraceOutput { path, .. }| !path.is_empty())
-        {
-            scope.spawn(async move {
-                let smoothed_path = smooth_path(path.clone(), alpha, beta);
-                if smoothed_path.len() == 1 {
-                    println!("Prev: {}", path.clone().len());
-                }
+    traces
+        .into_par_iter()
+        .filter(|TraceOutput { path, .. }| !path.is_empty())
+        .map(|TraceOutput { path, new_seeds }| {
+            let smoothed_path = smooth_path(path.clone(), alpha, beta);
+            if smoothed_path.len() == 1 {
+                println!("Prev: {}", path.clone().len());
+            }
 
-                let mut control_points_indices: Vec<usize> =
-                    highest_curvature_points(&smoothed_path, point_side_padding);
+            let mut control_points_indices: Vec<usize> =
+                highest_curvature_points(&smoothed_path, point_side_padding);
 
-                control_points_indices.sort();
+            control_points_indices.sort();
 
-                let curve = control_points_indices
-                    .iter()
-                    .map(|&index| {
-                        let position = smoothed_path[index];
-                        let velocity = if index == 0 {
-                            (smoothed_path[1] - position) / h_square
-                        } else if index == smoothed_path.len() - 1 {
-                            (smoothed_path[smoothed_path.len() - 1]
-                                - smoothed_path[smoothed_path.len() - 2])
-                                / h_square
-                        } else {
-                            blend_factor
-                                * ((smoothed_path[index + 1] - position) / h_square
-                                    + (position - smoothed_path[index - 1]) / h_square)
-                        };
+            let curve = control_points_indices
+                .iter()
+                .map(|&index| {
+                    let position = smoothed_path[index];
+                    let velocity = if index == 0 {
+                        (smoothed_path[1] - position) / h_square
+                    } else if index == smoothed_path.len() - 1 {
+                        (smoothed_path[smoothed_path.len() - 1]
+                            - smoothed_path[smoothed_path.len() - 2])
+                            / h_square
+                    } else {
+                        blend_factor
+                            * ((smoothed_path[index + 1] - position) / h_square
+                                + (position - smoothed_path[index - 1]) / h_square)
+                    };
 
-                        ControlPoint { position, velocity }
-                    })
-                    .collect::<Vec<_>>();
+                    ControlPoint { position, velocity }
+                })
+                .collect::<Vec<_>>();
 
-                SmoothedCurve { curve, new_seeds }
-            });
-        }
-    });
-
-    res.into_iter().collect()
+            SmoothedCurve { curve, new_seeds }
+        })
+        .collect()
 }
 
 pub fn smooth_path(path: Vec<Point>, alpha: f32, beta: f32) -> Vec<Point> {
@@ -767,7 +756,7 @@ fn distance_squared_to_nearest_curve_approximation(
     other_curves: &[HermiteCurve],
 ) -> f32 {
     other_curves
-        .iter()
+        .par_iter()
         .map(|curve| {
             (0..curve.len() - 1)
                 .map(|start_index| {
@@ -781,8 +770,7 @@ fn distance_squared_to_nearest_curve_approximation(
                 .reduce(|acc, e| if e < acc { e } else { acc })
                 .unwrap()
         })
-        .reduce(|acc, e| if e < acc { e } else { acc })
-        .unwrap_or(f32::MAX)
+        .reduce(|| f32::MAX, |acc, e| if e < acc { e } else { acc })
 }
 
 fn project_vector(subject: Point, target: Vector2<f32>) -> Point {

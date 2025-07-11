@@ -16,6 +16,7 @@ mod tensor_field;
 
 #[tokio::main]
 async fn main() {
+    let start_time = std::time::Instant::now();
     let grid_element = DesignElement::Grid {
         center: Vector2::new(100.0, 100.0),
         theta: -std::f32::consts::FRAC_PI_3 * 2.0,
@@ -41,7 +42,6 @@ async fn main() {
 
     let city_center = *radial_element.center().as_ref().unwrap();
 
-    let start_time = std::time::Instant::now();
 
     let tensor_field = TensorField::new(
         vec![grid_element, radial_element, grid_element_2, grid_element_3],
@@ -54,8 +54,7 @@ async fn main() {
         city_center,
         30.0,
         5,
-    )
-    .await;
+    );
 
     let minor_network_seed_points: Vec<SeedPoint> = major_network_major_curves
         .iter()
@@ -98,8 +97,7 @@ async fn main() {
         city_center,
         5.0,
         3,
-    )
-    .await;
+    );
 
     let minor_network: Result<Vec<Vec<Point>>, tokio::task::JoinError> = futures::future::join_all(
         minor_network_major_curves
@@ -114,7 +112,6 @@ async fn main() {
     let minor_network = minor_network.unwrap();
 
     println!("{}", start_time.elapsed().as_millis() as f32 / 1000.0);
-
 
     let mut engine = v4::V4::builder()
         .features(wgpu::Features::POLYGON_MODE_LINE)
