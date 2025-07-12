@@ -2,7 +2,7 @@ use core::f32;
 
 use image::{EncodableLayout, ImageBuffer};
 use nalgebra::Vector2;
-use street_plan::{SeedPoint, resample_curve, trace_street_plan};
+use street_plan::{connect_close_roads, resample_curve, trace_street_plan, SeedPoint};
 use tensor_field::{DesignElement, EvalEigenvectors, GRID_SIZE, Point, TensorField};
 use v4::{
     builtin_components::mesh_component::{MeshComponent, VertexDescriptor},
@@ -54,6 +54,8 @@ async fn main() {
         city_center,
         30.0,
         5,
+        Vec::new(),
+        Vec::new(),
     );
 
     let minor_network_seed_points: Vec<SeedPoint> = major_network_major_curves
@@ -80,9 +82,9 @@ async fn main() {
         .collect();
 
     let major_network: Result<Vec<Vec<Point>>, tokio::task::JoinError> = futures::future::join_all(
-        major_network_major_curves
+        major_network_major_curves.clone()
             .into_iter()
-            .chain(major_network_minor_curves)
+            .chain(major_network_minor_curves.clone())
             .map(|curve| tokio::spawn(async { resample_curve(curve, 20) })),
     )
     .await
@@ -91,13 +93,20 @@ async fn main() {
 
     let major_network = major_network.unwrap();
 
-    let (minor_network_major_curves, minor_network_minor_curves) = trace_street_plan(
+    let (minor_network_major_curves_unconnected, minor_network_minor_curves_unconnected) = trace_street_plan(
         &tensor_field,
         street_plan::TraceSeeds::Specific(minor_network_seed_points),
         city_center,
         5.0,
         3,
+        major_network_major_curves,
+        major_network_minor_curves,
     );
+
+    let minor_network_major_curves = connect_close_roads(&minor_network_major_curves_unconnected, 5.2);
+    println!("Major done");
+    let minor_network_minor_curves = connect_close_roads(&minor_network_minor_curves_unconnected, 5.2);
+    println!("Minor done");
 
     let minor_network: Result<Vec<Vec<Point>>, tokio::task::JoinError> = futures::future::join_all(
         minor_network_major_curves

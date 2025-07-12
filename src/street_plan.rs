@@ -181,6 +181,8 @@ pub fn trace_street_plan(
     city_center: Point,
     d_sep: f32,
     iter_count: usize,
+    previous_major_curves: Vec<HermiteCurve>,
+    previous_minor_curves: Vec<HermiteCurve>,
 ) -> (Vec<Vec<ControlPoint>>, Vec<Vec<ControlPoint>>) {
     let mut seed_points = match seeds {
         TraceSeeds::Random(starting_seed_count) => {
@@ -228,8 +230,10 @@ pub fn trace_street_plan(
         TraceSeeds::Specific(seed_points) => BinaryHeap::from(seed_points),
     };
 
-    let mut major_curves = Vec::new();
-    let mut minor_curves = Vec::new();
+    let prev_major_len = previous_major_curves.len();
+    let mut major_curves = previous_major_curves;
+    let prev_minor_len = previous_minor_curves.len();
+    let mut minor_curves = previous_minor_curves;
 
     let d_sep_val = d_sep;
 
@@ -291,7 +295,10 @@ pub fn trace_street_plan(
         }
     }
 
-    (major_curves, minor_curves)
+    (
+        major_curves[prev_major_len..].to_vec(),
+        minor_curves[prev_major_len..].to_vec(),
+    )
 }
 
 fn trace_lanes(
@@ -358,7 +365,7 @@ fn trace(
     let mut accumulated_distance = 0.0;
     let mut distance_since_last_seed = 0.0;
     let mut closest_distance_to_curves =
-        distance_squared_to_nearest_curve_approximation(seed, previous_curves).sqrt() - d_sep(seed);
+        raycast_to_curve(seed, previous_curves).sqrt() - d_sep(seed);
     let mut distance_since_last_distance_check = 0.0;
     let mut new_seeds = vec![];
     let mut steps = 0;
@@ -435,8 +442,7 @@ fn trace(
 
         if distance_since_last_distance_check >= closest_distance_to_curves {
             let new_closest_distance =
-                distance_squared_to_nearest_curve_approximation(new_pos, previous_curves).sqrt()
-                    - d_sep(new_pos);
+                raycast_to_curve(new_pos, previous_curves).sqrt() - d_sep(new_pos);
             if new_closest_distance <= 0.0 {
                 break;
             } else {
@@ -684,10 +690,8 @@ fn clip_pass(
                 .chain(previous_curves.iter().cloned())
                 .collect();
 
-            if distance_squared_to_nearest_curve_approximation(
-                current_curve[0].position,
-                &prev_curves_as_hermite,
-            ) < (0.85 * d_sep(current_curve[0].position) * d_sep(current_curve[0].position))
+            if raycast_to_curve(current_curve[0].position, &prev_curves_as_hermite)
+                < (0.85 * d_sep(current_curve[0].position) * d_sep(current_curve[0].position))
             {
                 return None;
             }
@@ -695,10 +699,7 @@ fn clip_pass(
             let control_point_distances_squared: Vec<f32> = current_curve
                 .iter()
                 .map(|control_point| {
-                    distance_squared_to_nearest_curve_approximation(
-                        control_point.position,
-                        &prev_curves_as_hermite,
-                    )
+                    raycast_to_curve(control_point.position, &prev_curves_as_hermite)
                 })
                 .collect();
 
@@ -751,10 +752,10 @@ fn clip_pass(
         .collect()
 }
 
-fn distance_squared_to_nearest_curve_approximation(
-    point: Point,
-    other_curves: &[HermiteCurve],
-) -> f32 {
+/// Returns the squared distance to the nearest point to save on computation.
+/// Raycasts to a piecewise linear approximation of the hermite curves. This isn't completely
+/// accurate but the curve fit is good enough where the error is negligible
+fn raycast_to_curve(point: Point, other_curves: &[HermiteCurve]) -> f32 {
     other_curves
         .par_iter()
         .map(|curve| {
@@ -773,6 +774,42 @@ fn distance_squared_to_nearest_curve_approximation(
         .reduce(|| f32::MAX, |acc, e| if e < acc { e } else { acc })
 }
 
+/// Returns the squared distance to the nearest point to save on computation.
+/// Raycasts to a piecewise linear approximation of the hermite curves. This isn't completely
+/// accurate but the curve fit is good enough where the error is negligible.
+/// This function also returns the closest approximation point, and the velocity at that approximation
+fn raycast_to_curve_with_more_info(
+    point: Point,
+    other_curves: &[HermiteCurve],
+) -> (f32, Point, Vector2<f32>) {
+    other_curves
+        .par_iter()
+        .map(|curve| {
+            (0..curve.len() - 1)
+                .map(|start_index| {
+                    let p_0 = curve[start_index].position;
+                    let p_1 = curve[start_index + 1].position;
+                    let segment_vector = p_1 - p_0;
+                    let projection = project_vector(point - p_0, segment_vector);
+
+                    let clamped_projection =
+                        clamp_vector_between_points(p_0, p_1, p_0 + projection);
+
+                    (
+                        (point - clamped_projection).norm_squared(),
+                        clamped_projection,
+                        segment_vector,
+                    )
+                })
+                .reduce(|acc, e| if e < acc { e } else { acc })
+                .unwrap()
+        })
+        .reduce(
+            || (f32::MAX, Point::zeros(), Vector2::zeros()),
+            |acc, e| if e.0 < acc.0 { e } else { acc },
+        )
+}
+
 fn project_vector(subject: Point, target: Vector2<f32>) -> Point {
     subject.dot(&target) / target.norm_squared() * target
 }
@@ -786,4 +823,91 @@ fn evaluate_hermite_curve(
 ) -> Point {
     t * (t * (t * (2.0 * (p_0 - p_1) + m_0 + m_1) - 2.0 * m_0 - m_1 - 3.0 * (p_0 - p_1)) + m_0)
         + p_0
+}
+
+pub fn connect_close_roads(curves: &[HermiteCurve], connection_distance: f32) -> Vec<HermiteCurve> {
+    curves
+        .par_iter()
+        .enumerate()
+        .map(|(i, curve)| {
+            let mut new_curve = Vec::new();
+
+            let start_point_raycast_prev =
+                raycast_to_curve_with_more_info(curve[0].position, &curves[..i]);
+            let start_point_raycast_next =
+                raycast_to_curve_with_more_info(curve[0].position, &curves[i + 1..]);
+
+            let (
+                start_point_closest_distance_squared,
+                start_point_closest_point,
+                start_point_closest_velocity,
+            ) = if start_point_raycast_prev.0 < start_point_raycast_next.0 {
+                start_point_raycast_prev
+            } else {
+                start_point_raycast_next
+            };
+
+            let start_point_closest_distance = start_point_closest_distance_squared.sqrt();
+
+            if start_point_closest_distance > 0.001
+                && start_point_closest_distance < connection_distance
+            {
+                new_curve.push(ControlPoint {
+                    position: start_point_closest_point,
+                    velocity: start_point_closest_velocity,
+                });
+                // let dist_to_next_point = (start_point_closest_point - curve[1].position).norm();
+                new_curve.extend(&curve[1..]);
+                /* if dist_to_next_point < (curve[1].position - curve[0].position).norm() {
+                    new_curve.extend(&curve[2..]);
+                } else {
+                    new_curve.extend(&curve[1..]);
+                } */
+            } else {
+                new_curve = curve.clone();
+            }
+
+            let end_point_raycast_prev =
+                raycast_to_curve_with_more_info(curve[curve.len() - 1].position, &curves[..i]);
+            let end_point_raycast_next =
+                raycast_to_curve_with_more_info(curve[curve.len() - 1].position, &curves[i + 1..]);
+
+            let (
+                end_point_closest_distance_squared,
+                end_point_closest_point,
+                end_point_closest_velocity,
+            ) = if end_point_raycast_prev.0 < end_point_raycast_next.0 {
+                end_point_raycast_prev
+            } else {
+                end_point_raycast_next
+            };
+
+            let end_point_closest_distance = end_point_closest_distance_squared.sqrt();
+
+            if end_point_closest_distance > 0.001
+                && end_point_closest_distance < connection_distance
+            {
+                /* let dist_to_prev_point = (end_point_closest_point - curve[curve.len() - 2].position).norm();
+                if dist_to_prev_point < (curve[curve.len() - 1].position - curve[curve.len() - 2].position).norm() {
+                    new_curve.remove(new_curve.len() - 1);
+                    new_curve.remove(new_curve.len() - 1);
+                } else {
+                    new_curve.remove(new_curve.len() - 1);
+                } */
+                new_curve.remove(new_curve.len() - 1);
+                new_curve.push(ControlPoint {
+                    position: end_point_closest_point,
+                    velocity: end_point_closest_velocity,
+                });
+            } else {
+                new_curve = curve.clone();
+            }
+
+            if new_curve.len() < 2 {
+                dbg!(new_curve.len());
+            }
+
+            new_curve
+        })
+        .collect()
 }
