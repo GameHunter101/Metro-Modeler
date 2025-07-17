@@ -502,7 +502,7 @@ fn clamp_vec_to_grid(vec: Vector2<f32>) -> Vector2<f32> {
     )
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ControlPoint {
     pub position: Point,
     pub velocity: Vector2<f32>,
@@ -825,27 +825,21 @@ fn evaluate_hermite_curve(
         + p_0
 }
 
-pub fn connect_close_roads(curves: &[HermiteCurve], connection_distance: f32) -> Vec<HermiteCurve> {
-    curves
+pub fn merge_road_endings(
+    original_curves: &[HermiteCurve],
+    curves_to_project_onto: &[HermiteCurve],
+    connection_distance: f32,
+) -> Vec<HermiteCurve> {
+    original_curves
         .par_iter()
-        .enumerate()
-        .map(|(i, curve)| {
+        .map(|curve| {
             let mut new_curve = Vec::new();
-
-            let start_point_raycast_prev =
-                raycast_to_curve_with_more_info(curve[0].position, &curves[..i]);
-            let start_point_raycast_next =
-                raycast_to_curve_with_more_info(curve[0].position, &curves[i + 1..]);
 
             let (
                 start_point_closest_distance_squared,
                 start_point_closest_point,
-                start_point_closest_velocity,
-            ) = if start_point_raycast_prev.0 < start_point_raycast_next.0 {
-                start_point_raycast_prev
-            } else {
-                start_point_raycast_next
-            };
+                _start_point_closest_velocity,
+            ) = raycast_to_curve_with_more_info(curve[0].position, &curves_to_project_onto);
 
             let start_point_closest_distance = start_point_closest_distance_squared.sqrt();
 
@@ -854,50 +848,31 @@ pub fn connect_close_roads(curves: &[HermiteCurve], connection_distance: f32) ->
             {
                 new_curve.push(ControlPoint {
                     position: start_point_closest_point,
-                    velocity: start_point_closest_velocity,
+                    velocity: curve[0].velocity,
                 });
-                // let dist_to_next_point = (start_point_closest_point - curve[1].position).norm();
                 new_curve.extend(&curve[1..]);
-                /* if dist_to_next_point < (curve[1].position - curve[0].position).norm() {
-                    new_curve.extend(&curve[2..]);
-                } else {
-                    new_curve.extend(&curve[1..]);
-                } */
             } else {
                 new_curve = curve.clone();
             }
 
-            let end_point_raycast_prev =
-                raycast_to_curve_with_more_info(curve[curve.len() - 1].position, &curves[..i]);
-            let end_point_raycast_next =
-                raycast_to_curve_with_more_info(curve[curve.len() - 1].position, &curves[i + 1..]);
-
             let (
                 end_point_closest_distance_squared,
                 end_point_closest_point,
-                end_point_closest_velocity,
-            ) = if end_point_raycast_prev.0 < end_point_raycast_next.0 {
-                end_point_raycast_prev
-            } else {
-                end_point_raycast_next
-            };
+                _end_point_closest_velocity,
+            ) = raycast_to_curve_with_more_info(
+                curve[curve.len() - 1].position,
+                &curves_to_project_onto,
+            );
 
             let end_point_closest_distance = end_point_closest_distance_squared.sqrt();
 
             if end_point_closest_distance > 0.001
                 && end_point_closest_distance < connection_distance
             {
-                /* let dist_to_prev_point = (end_point_closest_point - curve[curve.len() - 2].position).norm();
-                if dist_to_prev_point < (curve[curve.len() - 1].position - curve[curve.len() - 2].position).norm() {
-                    new_curve.remove(new_curve.len() - 1);
-                    new_curve.remove(new_curve.len() - 1);
-                } else {
-                    new_curve.remove(new_curve.len() - 1);
-                } */
                 new_curve.remove(new_curve.len() - 1);
                 new_curve.push(ControlPoint {
                     position: end_point_closest_point,
-                    velocity: end_point_closest_velocity,
+                    velocity: curve[curve.len() - 1].velocity,
                 });
             } else {
                 new_curve = curve.clone();
