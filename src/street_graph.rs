@@ -1,6 +1,10 @@
+use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::ptr::NonNull;
 
 use crate::tensor_field::Point;
+
+use rand::prelude::*;
 
 struct IntersectionPoint {
     position: Point,
@@ -41,200 +45,282 @@ impl Ord for EventPoint {
     }
 }
 
-fn get_x_val_of_segment_at_height(segment: &Segment, height: f32) -> f32 {
-    segment[0].x
-        + ((height - segment[0].y) / (segment[1] - segment[0]).y) * (segment[1] - segment[0]).x
-}
-
-#[derive(Clone)]
-struct Status {
-    curve_index: usize,
-    left: Option<Box<Status>>,
-    right: Option<Box<Status>>,
-}
+type Link = NonNull<Node>;
 
 type Segment = [Point; 2];
 
-impl Status {
-    fn is_leaf(&self) -> bool {
-        self.left.is_none() && self.right.is_none()
-    }
+#[derive(Debug, Clone)]
+struct Node {
+    node_type: NodeType,
+    next_ptrs: Vec<Link>,
+    prev_ptrs: Vec<Link>,
+}
 
-    fn height(&self) -> i32 {
-        if self.is_leaf() {
-            1
-        } else {
-            let left_height = if let Some(left_tree) = &self.left {
-                left_tree.height()
-            } else {
-                0
-            };
+impl Node {
+    fn new_empty_chain() -> NonNull<Node> {
+        unsafe {
+            let end_node = NonNull::new_unchecked(Box::into_raw(Box::new(Node {
+                node_type: NodeType::End,
+                next_ptrs: Vec::new(),
+                prev_ptrs: Vec::new(),
+            })));
 
-            let right_height = if let Some(right_tree) = &self.right {
-                right_tree.height()
-            } else {
-                0
-            };
+            let start_node = NonNull::new_unchecked(Box::into_raw(Box::new(Node {
+                node_type: NodeType::Start,
+                next_ptrs: vec![end_node],
+                prev_ptrs: Vec::new(),
+            })));
 
-            1 + left_height.max(right_height)
+            (*end_node.as_ptr()).prev_ptrs = vec![start_node];
+
+            start_node
         }
     }
 
-    fn balance(&self) -> i32 {
-        (if let Some(right_tree) = &self.right {
-            right_tree.height()
-        } else {
-            0
-        }) - (if let Some(left_tree) = &self.left {
-            left_tree.height()
-        } else {
-            0
-        })
-    }
-
-    fn rebalance_subtree(mut self: Box<Self>) -> Box<Self> {
-        if self.is_leaf() {
-            return self;
-        }
-
-        let balance = self.balance();
-
-        if balance.abs() == 2 {
-            let mut left_child = true;
-            let mut left_grandchild = true;
-
-            let imbalanced_child = if balance == -2 {
-                self.left.as_ref().unwrap()
-            } else {
-                left_child = false;
-                self.right.as_ref().unwrap()
-            };
-
-            if imbalanced_child.balance() >= 0 {
-                left_grandchild = false;
-            }
-
-            if left_child && left_grandchild {
-                self.rotate_right()
-            } else if !left_child && !left_grandchild {
-                self.rotate_left()
-            } else if left_child && !left_grandchild {
-                self.left = Some(self.left.unwrap().rotate_left());
-                self.rotate_right()
-            } else {
-                self.right = Some(self.right.unwrap().rotate_right());
-                self.rotate_left()
-            }
-        } else {
-            self
-        }
-    }
-
-    fn rebalance(mut self: Box<Self>) -> Box<Self> {
-        if self.is_leaf() {
-            return self;
-        }
-
-        self.left = if let Some(left_node) = self.left {
-            Some(left_node.rebalance())
-        } else {
-            None
-        };
-
-        self.right = if let Some(right_node) = self.right {
-            Some(right_node.rebalance())
-        } else {
-            None
-        };
-
-        self.rebalance_subtree()
-    }
-
-    fn rotate_left(self: Box<Self>) -> Box<Self> {
-        let mut new_left = self;
-        let mut target = new_left.right.unwrap();
-
-        new_left.right = target.left;
-        target.left = Some(new_left);
-        target
-    }
-
-    fn rotate_right(self: Box<Self>) -> Box<Self> {
-        let mut new_right = self;
-        let mut target = new_right.left.unwrap();
-
-        new_right.left = target.right;
-        target.right = Some(new_right);
-        target
-    }
-
-    fn insert_helper(
-        self: &mut Box<Self>,
-        curve_index: usize,
-        segment_start_position: Point,
+    fn traverse_level(
+        start: Link,
+        level: usize,
+        element: usize,
         segments: &[Segment],
+        height: f32,
+    ) -> (Link, Vec<Link>) {
+        unsafe {
+            if let Some(next) = start.as_ref().next_ptrs.get(level).copied() {
+                if (*next.as_ptr())
+                    .node_type
+                    .cmp(&NodeType::Value(element), segments, height)
+                    == Ordering::Greater
+                {
+                    if level == 0 {
+                        (start, Vec::new())
+                    } else {
+                        let (node, mut path) =
+                            Self::traverse_level(start, level - 1, element, segments, height);
+                        path.push(start);
+                        (node, path)
+                    }
+                } else {
+                    Self::traverse_level(next, level, element, segments, height)
+                }
+            } else {
+                (start, Vec::new())
+            }
+        }
+    }
+
+    fn append(
+        origin: Link,
+        end: Link,
+        node: Link,
+        element: usize,
+        traversal_path: Vec<Link>,
+        rng: &mut ThreadRng,
     ) {
-        let current_x_val =
-            get_x_val_of_segment_at_height(&segments[self.curve_index], segment_start_position.y);
+        unsafe {
+            let mut next_ptrs = Vec::new();
+            let mut prev_ptrs = Vec::new();
 
-        let new_node = Box::new(Status {
-            curve_index,
-            left: None,
-            right: None,
-        });
+            next_ptrs.push(node.as_ref().next_ptrs[0]);
+            prev_ptrs.push(node);
 
-        if current_x_val < segment_start_position.x {
-            let right_ref = &mut self.right;
-            match right_ref {
-                Some(right_node) => right_node.insert_helper(curve_index, segment_start_position, segments),
-                None => {
-                    *right_ref = Some(new_node);
+            for (level, node) in traversal_path.iter().copied().enumerate() {
+                let promotion: bool = rng.random();
+                if promotion {
+                    next_ptrs.push(node.as_ref().next_ptrs[level + 1]);
+                    prev_ptrs.push(node);
+                } else {
+                    break;
                 }
             }
-        } else {
-            let left_ref = &mut self.left;
-            match left_ref {
-                Some(left_node) => left_node.insert_helper(curve_index, segment_start_position, segments),
-                None => {
-                    *left_ref = Some(new_node);
-                }
+
+            let new_node = NonNull::new_unchecked(Box::into_raw(Box::new(Node {
+                node_type: NodeType::Value(element),
+                next_ptrs: next_ptrs.clone(),
+                prev_ptrs: prev_ptrs.clone(),
+            })));
+
+            for (level, node) in prev_ptrs.into_iter().enumerate() {
+                (&mut (*node.as_ptr()).next_ptrs)[level] = new_node;
             }
-        };
-    }
 
-    fn insert(
-        mut self: Box<Self>,
-        curve_index: usize,
-        segment_start_position: Point,
-        segments: &[Segment],
-    ) -> Box<Self> {
-        self.insert_helper(curve_index, segment_start_position, segments);
+            let promotion_count = next_ptrs.len();
 
-        self.rebalance_subtree()
-    }
+            for (level, node) in next_ptrs.into_iter().enumerate() {
+                (&mut (*node.as_ptr()).prev_ptrs)[level] = new_node;
+            }
 
-    fn format(&self, indent: String, is_final: bool, post: &str) -> String {
-        let mut output = format!(
-            "{} -+ {}{post}, b:{}\n",
-            indent.clone(),
-            self.curve_index,
-            self.balance()
-        );
-        let indent = indent + if is_final { "   " } else { "|  " };
-        if let Some(left_node) = &self.left {
-            output += &left_node.format(indent.clone(), self.right.is_none(), " # L");
+            if (traversal_path.len() == 0 || promotion_count == traversal_path.len())
+                && rng.random()
+            {
+                (*origin.as_ptr()).next_ptrs.push(new_node);
+                (*end.as_ptr()).prev_ptrs.push(new_node);
+
+                (*new_node.as_ptr()).next_ptrs.push(end);
+                (*new_node.as_ptr()).prev_ptrs.push(origin);
+            }
         }
-        if let Some(right_node) = &self.right {
-            output += &right_node.format(indent, true, " # R");
-        }
-
-        output
     }
 }
 
-impl std::fmt::Display for Status {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.format(String::new(), true, ""))
+#[derive(Debug, Clone)]
+enum NodeType {
+    Start,
+    Value(usize),
+    End,
+}
+
+impl NodeType {
+    fn get_x_val_of_segment_at_height(segment: &Segment, height: f32) -> f32 {
+        segment[0].x
+            + ((height - segment[0].y) / (segment[1] - segment[0]).y) * (segment[1] - segment[0]).x
+    }
+    fn cmp(&self, other: &NodeType, segments: &[Segment], height: f32) -> Ordering {
+        match self {
+            NodeType::Start => Ordering::Less,
+            NodeType::Value(lhs) => match other {
+                NodeType::Start => Ordering::Greater,
+                NodeType::Value(rhs) => {
+                    if rhs == lhs {
+                        Ordering::Equal
+                    } else {
+                        Self::get_x_val_of_segment_at_height(&segments[*lhs], height)
+                            .partial_cmp(&Self::get_x_val_of_segment_at_height(
+                                &segments[*rhs],
+                                height,
+                            ))
+                            .unwrap_or(Ordering::Less)
+                    }
+                }
+                NodeType::End => Ordering::Less,
+            },
+            NodeType::End => Ordering::Greater,
+        }
+    }
+}
+
+struct SkipList {
+    nodes: Link,
+    end: Link,
+    rng: ThreadRng,
+    len: usize,
+}
+
+impl SkipList {
+    fn new() -> Self {
+        unsafe {
+            let nodes = Node::new_empty_chain();
+            Self {
+                nodes,
+                end: nodes.as_ref().next_ptrs[0],
+                rng: rand::rng(),
+                len: 0,
+            }
+        }
+    }
+
+    fn height(&self) -> usize {
+        unsafe { (*self.nodes.as_ptr()).next_ptrs.len() }
+    }
+
+    fn insert(&mut self, element: usize, segments: &[Segment], height: f32) {
+        unsafe {
+            let (traverse_node, traverse_path) = Node::traverse_level(
+                self.nodes,
+                (*self.nodes.as_ptr()).next_ptrs.len() - 1,
+                element.clone(),
+                segments,
+                height,
+            );
+
+            Node::append(
+                self.nodes,
+                self.end,
+                traverse_node,
+                element,
+                traverse_path,
+                &mut self.rng,
+            );
+
+            self.len += 1;
+        }
+    }
+
+    fn remove(&mut self, element: usize, segments: &[Segment], height: f32) -> bool {
+        unsafe {
+            let (traverse_target, _) = Node::traverse_level(
+                self.nodes,
+                self.height() - 1,
+                element.clone(),
+                segments,
+                height,
+            );
+
+            if (*traverse_target.as_ptr()).node_type.cmp(
+                &NodeType::Value(element),
+                segments,
+                height,
+            ) == Ordering::Equal
+            {
+                let boxed_target = Box::from_raw(traverse_target.as_ptr());
+
+                let node_prev_ptrs = boxed_target.prev_ptrs.clone();
+                let node_next_ptrs = boxed_target.next_ptrs.clone();
+
+                assert_eq!(node_prev_ptrs.len(), node_next_ptrs.len());
+
+                for i in 0..node_next_ptrs.len() {
+                    (&mut (*node_prev_ptrs[i].as_ptr()).next_ptrs)[i] = node_next_ptrs[i];
+                    (&mut (*node_next_ptrs[i].as_ptr()).prev_ptrs)[i] = node_prev_ptrs[i];
+                }
+
+                self.len -= 1;
+
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn iter(&self) -> Iter {
+        unsafe {
+            Iter {
+                next: Some(self.nodes.as_ref()),
+            }
+        }
+    }
+}
+
+impl Drop for SkipList {
+    fn drop(&mut self) {
+        unsafe {
+            while !(*self.nodes.as_ptr()).next_ptrs.is_empty() {
+                let boxed_node = Box::from_raw(self.nodes.as_ptr());
+                self.nodes = boxed_node.next_ptrs[0];
+            }
+            let _ = Box::from_raw(self.nodes.as_ptr());
+        }
+    }
+}
+
+struct Iter<'a> {
+    next: Option<&'a Node>,
+}
+
+impl<'a> Iterator for Iter<'a> {
+    type Item = &'a NodeType;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        unsafe {
+            self.next.take().map(|node| {
+                self.next = node.next_ptrs.get(0).map(|ptr| ptr.as_ref());
+                &node.node_type
+            })
+        }
     }
 }
 
@@ -272,44 +358,6 @@ fn find_interesctions(lines: &[[Point; 2]]) -> Vec<IntersectionPoint> {
 }
 
 pub fn test_status() {
-    /* let mut status = Box::new(Status {
-        curve_index: 55,
-        left: Some(Box::new(Status {
-            curve_index: 41,
-            left: None,
-            right: Some(Box::new(Status {
-                curve_index: 49,
-                left: None,
-                right: None,
-            })),
-        })),
-        right: Some(Box::new(Status {
-            curve_index: 72,
-            left: Some(Box::new(Status {
-                curve_index: 64,
-                left: None,
-                right: Some(Box::new(Status {
-                    curve_index: 67,
-                    left: Some(Box::new(Status {
-                        curve_index: 65,
-                        left: None,
-                        right: None,
-                    })),
-                    right: None,
-                })),
-            })),
-            right: Some(Box::new(Status {
-                curve_index: 81,
-                left: None,
-                right: Some(Box::new(Status {
-                    curve_index: 82,
-                    left: None,
-                    right: None,
-                })),
-            })),
-        })),
-    }); */
-
     let segments = vec![
         [Point::new(1.0, 1.0), Point::new(2.0, -4.0)],
         [Point::new(-5.0, 12.0), Point::new(13.0, -0.2)],
@@ -317,24 +365,11 @@ pub fn test_status() {
         [Point::new(-10.0, -5.0), Point::new(2.0, 5.0)],
     ];
 
-    let mut status = Box::new(Status{curve_index: 0, left: None, right: None});
-
-    for i in 1..segments.len() {
-        let start_pos = if segments[i][0].y > segments[i][1].y {segments[i][0]} else {segments[i][1]};
-        status = status.insert(i, start_pos, &segments);
+    let mut list = SkipList::new();
+    for i in 0..segments.len() {
+        list.insert(i, &segments, 0.9);
     }
 
-    println!("{status}");
-    println!("----------");
-    status = status.rebalance();
-    println!("{status}");
-    /* println!("----------");
-    let r = status.right.as_mut().unwrap();
-    let r_l = r.left.as_mut().unwrap();
-    r_l.left = None;
-    println!("{status}");
-    println!("----------");
-    status = status.rebalance();
-    println!("{status}"); */
+    println!("{:?}", list.iter().collect::<Vec<_>>());
     panic!();
 }
