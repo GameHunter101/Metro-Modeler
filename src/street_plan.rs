@@ -53,7 +53,7 @@ fn closest_distance_to_points(candidate: Point, points: &[Point]) -> f32 {
         .sqrt()
 }
 
-#[derive(Debug, PartialEq, PartialOrd)]
+#[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
 pub struct SeedPoint {
     pub seed: Point,
     pub priority: f32,
@@ -175,6 +175,15 @@ pub enum TraceSeeds {
     Specific(Vec<SeedPoint>),
 }
 
+pub fn heap_to_vec<T: Clone + Ord>(heap: BinaryHeap<T>) -> Vec<T> {
+    let mut res = Vec::new();
+    let mut heap = heap.clone();
+    while let Some(head) = heap.pop() {
+        res.push(head);
+    }
+    res
+}
+
 pub fn trace_street_plan(
     tensor_field: &TensorField,
     seeds: TraceSeeds,
@@ -243,7 +252,7 @@ pub fn trace_street_plan(
         let follow_major_eigenvectors = (i % 2) == 0;
 
         let traces = trace_lanes(
-            seed_points
+            heap_to_vec(seed_points.clone())
                 .iter()
                 .enumerate()
                 .map(|(i, seed)| (i, seed.seed))
