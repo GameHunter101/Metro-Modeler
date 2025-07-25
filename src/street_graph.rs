@@ -1,26 +1,58 @@
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
-use std::ptr::NonNull;
+use std::collections::{BinaryHeap, HashSet};
 
+use crate::status::SkipList;
 use crate::tensor_field::Point;
 
-use ordered_float::OrderedFloat;
-use rand::prelude::*;
-
+#[derive(Debug, PartialEq, PartialOrd)]
 struct IntersectionPoint {
     position: Point,
     intersecting_segment_indices: Vec<usize>,
 }
 
-#[derive(PartialEq, Debug, Clone, Copy)]
-struct EventPoint {
+#[derive(PartialEq, Debug, Clone)]
+pub struct EventPoint {
     position: Point,
-    segment_index: usize,
+    segment_indices: HashSet<usize>,
     event_type: EventPointType,
 }
 
+impl EventPoint {
+    pub fn new(
+        position: Point,
+        segment_indices: HashSet<usize>,
+        event_type: EventPointType,
+    ) -> Self {
+        Self {
+            position,
+            segment_indices,
+            event_type,
+        }
+    }
+
+    pub fn position(&self) -> Point {
+        self.position
+    }
+
+    pub fn segment_indices(&self) -> &HashSet<usize> {
+        &self.segment_indices
+    }
+
+    pub fn event_type(&self) -> EventPointType {
+        self.event_type
+    }
+
+    pub fn add_segments(&mut self, segment_indices: &HashSet<usize>) {
+        self.segment_indices = self
+            .segment_indices
+            .union(segment_indices)
+            .copied()
+            .collect();
+    }
+}
+
 #[derive(PartialEq, PartialOrd, Eq, Debug, Clone, Copy)]
-enum EventPointType {
+pub enum EventPointType {
     StartPoint,
     Intersection,
     EndPoint,
@@ -33,7 +65,7 @@ impl PartialOrd for EventPoint {
         match self.position.y.partial_cmp(&other.position.y) {
             Some(y_comp) => {
                 if y_comp == std::cmp::Ordering::Equal {
-                    self.position.x.partial_cmp(&other.position.x)
+                    std::cmp::Reverse(self.position.x).partial_cmp(&std::cmp::Reverse(other.position.x))
                 } else {
                     Some(y_comp)
                 }
@@ -49,358 +81,7 @@ impl Ord for EventPoint {
     }
 }
 
-type Link = NonNull<Node>;
-
-type Segment = [Point; 2];
-
-#[derive(Debug, Clone)]
-struct Node {
-    node_type: NodeType,
-    next_ptrs: Vec<Link>,
-    prev_ptrs: Vec<Link>,
-}
-
-impl Node {
-    fn new_empty_chain() -> NonNull<Node> {
-        unsafe {
-            let end_node = NonNull::new_unchecked(Box::into_raw(Box::new(Node {
-                node_type: NodeType::End,
-                next_ptrs: Vec::new(),
-                prev_ptrs: Vec::new(),
-            })));
-
-            let start_node = NonNull::new_unchecked(Box::into_raw(Box::new(Node {
-                node_type: NodeType::Start,
-                next_ptrs: vec![end_node],
-                prev_ptrs: Vec::new(),
-            })));
-
-            (*end_node.as_ptr()).prev_ptrs = vec![start_node];
-
-            start_node
-        }
-    }
-
-    fn traverse_level(
-        start: Link,
-        level: usize,
-        element: usize,
-        segments: &[Segment],
-        height: f32,
-    ) -> (Link, Vec<Link>) {
-        unsafe {
-            if let Some(next) = start.as_ref().next_ptrs.get(level).copied() {
-                if (*next.as_ptr())
-                    .node_type
-                    .cmp(&NodeType::Value(element), segments, height)
-                    == Ordering::Greater
-                {
-                    if level == 0 {
-                        (start, Vec::new())
-                    } else {
-                        let (node, mut path) =
-                            Self::traverse_level(start, level - 1, element, segments, height);
-                        path.push(start);
-                        (node, path)
-                    }
-                } else {
-                    Self::traverse_level(next, level, element, segments, height)
-                }
-            } else {
-                (start, Vec::new())
-            }
-        }
-    }
-
-    fn append(
-        origin: Link,
-        end: Link,
-        node: Link,
-        element: usize,
-        traversal_path: Vec<Link>,
-        rng: &mut ThreadRng,
-    ) -> (Option<usize>, Option<usize>) {
-        unsafe {
-            let max_possible_height = traversal_path.len() + 1;
-            let height = rng.random_range(1..=max_possible_height);
-
-            let all_previous_nodes: Vec<Link> = std::iter::once(node)
-                .chain(traversal_path.iter().copied())
-                .collect();
-
-            let (prev_ptrs, next_ptrs): (Vec<Link>, Vec<Link>) = (0..height)
-                .map(|level| {
-                    (
-                        all_previous_nodes[level],
-                        all_previous_nodes[level].as_ref().next_ptrs[level],
-                    )
-                })
-                .unzip();
-
-            let new_node = NonNull::new_unchecked(Box::into_raw(Box::new(Node {
-                node_type: NodeType::Value(element),
-                next_ptrs: next_ptrs.clone(),
-                prev_ptrs: prev_ptrs.clone(),
-            })));
-
-            for level in 0..prev_ptrs.len() {
-                (&mut (*prev_ptrs[level].as_ptr()).next_ptrs)[level] = new_node;
-                (&mut (*next_ptrs[level].as_ptr()).prev_ptrs)[level] = new_node;
-            }
-
-            if height == max_possible_height && rng.random() {
-                (&mut (*origin.as_ptr()).next_ptrs).push(new_node);
-                (&mut (*end.as_ptr()).prev_ptrs).push(new_node);
-
-                (&mut (*new_node.as_ptr()).next_ptrs).push(end);
-                (&mut (*new_node.as_ptr()).prev_ptrs).push(origin);
-            }
-
-            let prev_neighbor_type = &(*prev_ptrs[0].as_ptr()).node_type;
-            let next_neighbor_type = &(*next_ptrs[0].as_ptr()).node_type;
-
-            let prev_neighbor = if let NodeType::Value(val) = prev_neighbor_type {
-                Some(*val)
-            } else {
-                None
-            };
-
-            let next_neighbor = if let NodeType::Value(val) = next_neighbor_type {
-                Some(*val)
-            } else {
-                None
-            };
-
-            (prev_neighbor, next_neighbor)
-        }
-        /* unsafe {
-            let mut next_ptrs = Vec::new();
-            let mut prev_ptrs = Vec::new();
-
-            next_ptrs.push(node.as_ref().next_ptrs[0]);
-            prev_ptrs.push(node);
-
-            for (level, node) in traversal_path.iter().copied().enumerate() {
-                let promotion: bool = rng.random();
-                if promotion {
-                    next_ptrs.push(node.as_ref().next_ptrs[level + 1]);
-                    prev_ptrs.push(node);
-                } else {
-                    break;
-                }
-            }
-
-            let new_node = NonNull::new_unchecked(Box::into_raw(Box::new(Node {
-                node_type: NodeType::Value(element),
-                next_ptrs: next_ptrs.clone(),
-                prev_ptrs: prev_ptrs.clone(),
-            })));
-
-            for (level, node) in prev_ptrs.iter().enumerate() {
-                (&mut (*node.as_ptr()).next_ptrs)[level] = new_node;
-            }
-
-            let promotion_count = next_ptrs.len();
-
-            for (level, node) in next_ptrs.iter().enumerate() {
-                (&mut (*node.as_ptr()).prev_ptrs)[level] = new_node;
-            }
-
-            if (traversal_path.len() == 0 || promotion_count == traversal_path.len())
-                && rng.random()
-            {
-                (*origin.as_ptr()).next_ptrs.push(new_node);
-                (*end.as_ptr()).prev_ptrs.push(new_node);
-
-                (*new_node.as_ptr()).next_ptrs.push(end);
-                (*new_node.as_ptr()).prev_ptrs.push(origin);
-            }
-
-            let prev_neighbor_type = &(*prev_ptrs[0].as_ptr()).node_type;
-            let next_neighbor_type = &(*next_ptrs[0].as_ptr()).node_type;
-
-            let prev_neighbor = if let NodeType::Value(val) = prev_neighbor_type {
-                Some(*val)
-            } else {
-                None
-            };
-
-            let next_neighbor = if let NodeType::Value(val) = next_neighbor_type {
-                Some(*val)
-            } else {
-                None
-            };
-
-            (prev_neighbor, next_neighbor)
-        } */
-    }
-}
-
-#[derive(Debug, Clone)]
-enum NodeType {
-    Start,
-    Value(usize),
-    End,
-}
-fn get_x_val_of_segment_at_height(segment: &Segment, height: f32) -> f32 {
-    segment[0].x
-        + ((height - segment[0].y) / (segment[1] - segment[0]).y) * (segment[1] - segment[0]).x
-}
-
-impl NodeType {
-    fn cmp(&self, other: &NodeType, segments: &[Segment], height: f32) -> Ordering {
-        match self {
-            NodeType::Start => Ordering::Less,
-            NodeType::Value(lhs) => match other {
-                NodeType::Start => Ordering::Greater,
-                NodeType::Value(rhs) => {
-                    if rhs == lhs {
-                        Ordering::Equal
-                    } else {
-                        let lhs_x = get_x_val_of_segment_at_height(&segments[*lhs], height);
-                        let rhs_x = get_x_val_of_segment_at_height(&segments[*rhs], height);
-                        lhs_x.partial_cmp(&rhs_x).unwrap_or(Ordering::Less)
-                    }
-                }
-                NodeType::End => Ordering::Less,
-            },
-            NodeType::End => Ordering::Greater,
-        }
-    }
-}
-
-struct SkipList {
-    nodes: Link,
-    end: Link,
-    rng: ThreadRng,
-    len: usize,
-}
-
-impl SkipList {
-    fn new() -> Self {
-        unsafe {
-            let nodes = Node::new_empty_chain();
-            Self {
-                nodes,
-                end: nodes.as_ref().next_ptrs[0],
-                rng: rand::rng(),
-                len: 0,
-            }
-        }
-    }
-
-    fn height(&self) -> usize {
-        unsafe { (*self.nodes.as_ptr()).next_ptrs.len() }
-    }
-
-    fn insert(
-        &mut self,
-        element: usize,
-        segments: &[Segment],
-        height: f32,
-    ) -> (Option<usize>, Option<usize>) {
-        unsafe {
-            let (traverse_node, traverse_path) = Node::traverse_level(
-                self.nodes,
-                (*self.nodes.as_ptr()).next_ptrs.len() - 1,
-                element.clone(),
-                segments,
-                height,
-            );
-
-            self.len += 1;
-
-            Node::append(
-                self.nodes,
-                self.end,
-                traverse_node,
-                element,
-                traverse_path,
-                &mut self.rng,
-            )
-        }
-    }
-
-    fn remove(&mut self, element: usize, segments: &[Segment], height: f32) -> bool {
-        unsafe {
-            let (traverse_target, _) = Node::traverse_level(
-                self.nodes,
-                self.height() - 1,
-                element.clone(),
-                segments,
-                height,
-            );
-
-            if (*traverse_target.as_ptr()).node_type.cmp(
-                &NodeType::Value(element),
-                segments,
-                height,
-            ) == Ordering::Equal
-            {
-                let boxed_target = Box::from_raw(traverse_target.as_ptr());
-
-                let node_prev_ptrs = boxed_target.prev_ptrs.clone();
-                let node_next_ptrs = boxed_target.next_ptrs.clone();
-
-                assert_eq!(node_prev_ptrs.len(), node_next_ptrs.len());
-
-                for i in 0..node_next_ptrs.len() {
-                    (&mut (*node_prev_ptrs[i].as_ptr()).next_ptrs)[i] = node_next_ptrs[i];
-                    (&mut (*node_next_ptrs[i].as_ptr()).prev_ptrs)[i] = node_prev_ptrs[i];
-                }
-
-                self.len -= 1;
-
-                true
-            } else {
-                false
-            }
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn iter(&self, level: usize) -> Iter {
-        unsafe {
-            Iter {
-                next: Some(self.nodes.as_ref()),
-                level,
-            }
-        }
-    }
-}
-
-impl Drop for SkipList {
-    fn drop(&mut self) {
-        unsafe {
-            while !(*self.nodes.as_ptr()).next_ptrs.is_empty() {
-                let boxed_node = Box::from_raw(self.nodes.as_ptr());
-                self.nodes = boxed_node.next_ptrs[0];
-            }
-            let _ = Box::from_raw(self.nodes.as_ptr());
-        }
-    }
-}
-
-struct Iter<'a> {
-    next: Option<&'a Node>,
-    level: usize,
-}
-
-impl<'a> Iterator for Iter<'a> {
-    type Item = &'a NodeType;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        unsafe {
-            self.next.take().map(|node| {
-                self.next = node.next_ptrs.get(self.level).map(|ptr| ptr.as_ref());
-                &node.node_type
-            })
-        }
-    }
-}
+pub type Segment = [Point; 2];
 
 fn segments_to_event_queue(segments: &[Segment]) -> BinaryHeap<EventPoint> {
     BinaryHeap::from_iter(segments.iter().enumerate().flat_map(|(i, &[start, end])| {
@@ -412,12 +93,12 @@ fn segments_to_event_queue(segments: &[Segment]) -> BinaryHeap<EventPoint> {
         [
             EventPoint {
                 position: start,
-                segment_index: i,
+                segment_indices: HashSet::from_iter(std::iter::once(i)),
                 event_type: EventPointType::StartPoint,
             },
             EventPoint {
                 position: end,
-                segment_index: i,
+                segment_indices: HashSet::from_iter(std::iter::once(i)),
                 event_type: EventPointType::EndPoint,
             },
         ]
@@ -432,14 +113,10 @@ fn calc_intersection_point(segment_0: Segment, segment_1: Segment) -> Option<Poi
     let r = segment_0[1];
     let s = segment_1[1];
 
-    println!("({p:?}, {r:?}) | ({q:?}, {s:?})");
-
     let denominator = cross(s - q, r - p);
 
     let u = cross(p - q, s - q) / denominator;
     let t = cross(p - q, r - p) / denominator;
-
-    println!("u: {u}, t: {t}");
 
     if (u >= 0.0 && u <= 1.0) && (t >= 0.0 && t <= 1.0) {
         Some(p + u * (r - p))
@@ -455,54 +132,82 @@ fn update_status(
 ) -> (Vec<EventPoint>, Option<IntersectionPoint>) {
     match event.event_type {
         EventPointType::StartPoint => {
-            let (left_neighbor, right_neighbor) =
-                status.insert(event.segment_index, &segments, event.position.y);
+            let (all_left_neighbors, all_right_neighbors): (
+                Vec<Option<usize>>,
+                Vec<Option<usize>>,
+            ) = event
+                .segment_indices
+                .iter()
+                .map(|segment_index| status.insert(*segment_index, &segments, event.position.y))
+                .unzip();
 
-            let mut start_point_intersecting_segments = Vec::new();
+            let non_event_left_neighbors: Vec<usize> = all_left_neighbors
+                .iter()
+                .flat_map(|segment| {
+                    if let Some(real_segment) = segment
+                        && !event.segment_indices.contains(real_segment)
+                    {
+                        Some(*real_segment)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let left_neighbor = non_event_left_neighbors.get(0).copied();
+
+            let non_event_right_neighbors: Vec<usize> = all_right_neighbors
+                .iter()
+                .flat_map(|segment| {
+                    if let Some(real_segment) = segment
+                        && !event.segment_indices.contains(real_segment)
+                    {
+                        Some(*real_segment)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let right_neighbor = non_event_right_neighbors.get(0).copied();
+
+            let start_point_intersecting_segments = if event.segment_indices.len() == 1 {
+                Vec::new()
+            } else {
+                event.segment_indices.iter().copied().collect()
+            };
 
             let mut lower_intersection_points = Vec::new();
 
-            if let Some(left_neighbor) = left_neighbor {
-                if get_x_val_of_segment_at_height(&segments[left_neighbor], event.position.y)
-                    == event.position.x
-                {
-                    start_point_intersecting_segments.push(left_neighbor);
+            for index in &event.segment_indices {
+                if let Some(left_neighbor) = left_neighbor {
+                    if let Some(intersection_point) =
+                        calc_intersection_point(segments[left_neighbor], segments[*index])
+                        && intersection_point.y < event.position.y
+                    {
+                        lower_intersection_points.push((
+                            intersection_point,
+                            HashSet::from_iter(vec![*index, left_neighbor]),
+                        ));
+                    }
                 }
 
-                println!(
-                    "Intersection calc - left: {left_neighbor}, origin: {}",
-                    event.segment_index
-                );
-                if let Some(intersection_point) =
-                    calc_intersection_point(segments[left_neighbor], segments[event.segment_index])
-                {
-                    lower_intersection_points.push(intersection_point);
-                }
-            }
-
-            if let Some(right_neighbor) = right_neighbor {
-                if get_x_val_of_segment_at_height(&segments[right_neighbor], event.position.y)
-                    == event.position.x
-                {
-                    start_point_intersecting_segments.push(right_neighbor);
-                }
-
-                println!(
-                    "Intersection calc - right: {right_neighbor}, origin: {}",
-                    event.segment_index
-                );
-                if let Some(intersection_point) =
-                    calc_intersection_point(segments[right_neighbor], segments[event.segment_index])
-                {
-                    lower_intersection_points.push(intersection_point);
+                if let Some(right_neighbor) = right_neighbor {
+                    if let Some(intersection_point) =
+                        calc_intersection_point(segments[right_neighbor], segments[*index])
+                        && intersection_point.y < event.position.y
+                    {
+                        lower_intersection_points.push((
+                            intersection_point,
+                            HashSet::from_iter(vec![*index, right_neighbor]),
+                        ));
+                    }
                 }
             }
 
             let event_points: Vec<EventPoint> = lower_intersection_points
                 .into_iter()
-                .map(|position| EventPoint {
+                .map(|(position, segment_indices)| EventPoint {
                     position,
-                    segment_index: event.segment_index,
+                    segment_indices,
                     event_type: EventPointType::Intersection,
                 })
                 .collect();
@@ -536,7 +241,7 @@ fn find_interesctions(segments: &[Segment]) -> Vec<IntersectionPoint> {
             intersections.push(intersection);
         }
 
-        event_queue.extend(new_events.iter());
+        event_queue.extend(new_events.into_iter());
     }
 
     intersections
@@ -563,13 +268,13 @@ pub fn test_status() {
 
 #[cfg(test)]
 mod test {
-    use core::f32;
+    use std::{collections::HashSet, iter};
 
-    use crate::{street_graph::NodeType, street_plan::heap_to_vec, tensor_field::Point};
+    use crate::{street_graph::IntersectionPoint, street_plan::heap_to_vec, tensor_field::Point};
 
     use super::{
-        EventPoint, EventPointType, SkipList, calc_intersection_point, find_interesctions,
-        segments_to_event_queue, update_status,
+        EventPoint, EventPointType, SkipList, calc_intersection_point, segments_to_event_queue,
+        update_status,
     };
 
     #[test]
@@ -583,12 +288,12 @@ mod test {
         let expected_event_queue_vec = vec![
             EventPoint {
                 position: Point::new(1.0, 1.0),
-                segment_index: 0,
+                segment_indices: HashSet::from_iter(std::iter::once(0)),
                 event_type: EventPointType::StartPoint,
             },
             EventPoint {
                 position: Point::new(2.0, -4.0),
-                segment_index: 0,
+                segment_indices: HashSet::from_iter(std::iter::once(0)),
                 event_type: EventPointType::EndPoint,
             },
         ];
@@ -611,229 +316,47 @@ mod test {
         let proper_events = [
             EventPoint {
                 position: Point::new(-5.0, 12.0),
-                segment_index: 1,
+                segment_indices: HashSet::from_iter(iter::once(1)),
                 event_type: EventPointType::StartPoint,
             },
             EventPoint {
                 position: Point::new(2.0, 5.0),
-                segment_index: 3,
+                segment_indices: HashSet::from_iter(iter::once(3)),
                 event_type: EventPointType::StartPoint,
             },
             EventPoint {
                 position: Point::new(2.0, 2.0),
-                segment_index: 2,
+                segment_indices: HashSet::from_iter(iter::once(2)),
                 event_type: EventPointType::StartPoint,
             },
             EventPoint {
                 position: Point::new(1.0, 1.0),
-                segment_index: 0,
+                segment_indices: HashSet::from_iter(iter::once(0)),
                 event_type: EventPointType::StartPoint,
             },
             EventPoint {
                 position: Point::new(13.0, -0.2),
-                segment_index: 1,
+                segment_indices: HashSet::from_iter(iter::once(1)),
                 event_type: EventPointType::EndPoint,
             },
             EventPoint {
                 position: Point::new(2.0, -4.0),
-                segment_index: 0,
+                segment_indices: HashSet::from_iter(iter::once(0)),
                 event_type: EventPointType::EndPoint,
             },
             EventPoint {
                 position: Point::new(-10.0, -5.0),
-                segment_index: 3,
+                segment_indices: HashSet::from_iter(iter::once(3)),
                 event_type: EventPointType::EndPoint,
             },
             EventPoint {
                 position: Point::new(0.0, -10.0),
-                segment_index: 2,
+                segment_indices: HashSet::from_iter(iter::once(2)),
                 event_type: EventPointType::EndPoint,
             },
         ];
 
         assert_eq!(event_queue_as_vec, proper_events);
-    }
-
-    #[test]
-    fn start_points_are_correctly_inserted_into_status() {
-        let segments = [
-            [Point::new(-5.0, 12.0), Point::new(13.0, -0.2)],
-            [Point::new(2.0, 5.0), Point::new(-10.0, -5.0)],
-            [Point::new(2.0, 2.0), Point::new(0.0, -10.0)],
-        ];
-
-        let mut status = SkipList::new();
-
-        let mut new_events: Vec<EventPoint> = Vec::new();
-        let mut new_intersections = Vec::new();
-
-        for (i, segment) in segments.iter().enumerate() {
-            let event = EventPoint {
-                position: segment[0],
-                segment_index: i,
-                event_type: EventPointType::StartPoint,
-            };
-
-            let (result_events, result_intersection) = update_status(&mut status, event, &segments);
-
-            new_events.extend(result_events.iter());
-            if let Some(intersection) = result_intersection {
-                new_intersections.push(intersection);
-            }
-        }
-
-        assert!(new_events.is_empty());
-        assert!(new_intersections.is_empty());
-
-        let status_as_vec: Vec<usize> = status
-            .iter(0)
-            .flat_map(|node_type| {
-                if let NodeType::Value(curve_index) = node_type {
-                    Some(*curve_index)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let expected_status_vec = vec![1, 2, 0];
-
-        assert_eq!(status_as_vec, expected_status_vec);
-    }
-
-    fn points_are_close(p_1: Point, p_2: Point) {
-        println!("--- {p_1:?} | {p_2:?}");
-        assert!((p_1 - p_2).norm() < 0.00001)
-    }
-
-    #[test]
-    fn start_points_correctly_calculate_single_future_intersection() {
-        let segments = [
-            [Point::new(-5.0, 12.0), Point::new(13.0, -0.2)],
-            [Point::new(2.0, 5.0), Point::new(-10.0, -5.0)],
-            [Point::new(-0.7, 1.5), Point::new(1.4, 0.0)],
-            [Point::new(1.0, 1.0), Point::new(2.0, -4.0)],
-        ];
-
-        let mut status = SkipList::new();
-
-        let mut new_events: Vec<EventPoint> = Vec::new();
-        let mut new_intersections = Vec::new();
-
-        for (i, segment) in segments.iter().enumerate() {
-            let event = EventPoint {
-                position: segment[0],
-                segment_index: i,
-                event_type: EventPointType::StartPoint,
-            };
-
-            let (result_events, result_intersection) = update_status(&mut status, event, &segments);
-
-            new_events.extend(result_events.iter());
-            if let Some(intersection) = result_intersection {
-                new_intersections.push(intersection);
-            }
-        }
-
-        let expected_new_events = vec![EventPoint {
-            position: Point::new(1.16666667, 0.16666667),
-            segment_index: 3,
-            event_type: EventPointType::Intersection,
-        }];
-
-        assert_eq!(new_events.len(), expected_new_events.len());
-        for (i, expected_event) in expected_new_events.iter().enumerate() {
-            let real_event = new_events[i];
-            points_are_close(real_event.position, expected_event.position);
-        }
-        assert!(new_intersections.is_empty());
-
-        let status_as_vec: Vec<usize> = status
-            .iter(0)
-            .flat_map(|node_type| {
-                if let NodeType::Value(curve_index) = node_type {
-                    Some(*curve_index)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let expected_status_vec = vec![1, 2, 3, 0];
-
-        assert_eq!(status_as_vec, expected_status_vec);
-    }
-
-    #[test]
-    fn start_points_correctly_calculate_double_future_intersection() {
-        let segments = [
-            [Point::new(-5.0, 12.0), Point::new(13.0, -0.2)],
-            [Point::new(2.0, 5.0), Point::new(-10.0, -5.0)],
-            [Point::new(2.0, 2.0), Point::new(0.0, -10.0)],
-            [Point::new(-0.7, 1.5), Point::new(1.4, 0.0)],
-            [Point::new(1.0, 1.0), Point::new(2.0, -4.0)],
-        ];
-
-        let mut status = SkipList::new();
-
-        let mut new_events: Vec<EventPoint> = Vec::new();
-        let mut new_intersections = Vec::new();
-
-        for (i, segment) in segments.iter().enumerate() {
-            let event = EventPoint {
-                position: segment[0],
-                segment_index: i,
-                event_type: EventPointType::StartPoint,
-            };
-
-            if i == 4 {
-                println!("Status: {:?}", status.iter(0).collect::<Vec<_>>());
-                println!("!!!!!");
-            }
-
-            let (result_events, result_intersection) = update_status(&mut status, event, &segments);
-
-            new_events.extend(result_events.iter());
-            if let Some(intersection) = result_intersection {
-                new_intersections.push(intersection);
-            }
-        }
-
-        let expected_new_events = vec![
-            EventPoint {
-                position: Point::new(1.16666667, 0.16666667),
-                segment_index: 3,
-                event_type: EventPointType::Intersection,
-            },
-            EventPoint {
-                position: Point::new(1.45454545, -1.27272727),
-                segment_index: 3,
-                event_type: EventPointType::Intersection,
-            },
-        ];
-
-        assert_eq!(new_events.len(), expected_new_events.len());
-        for (i, expected_event) in expected_new_events.iter().enumerate() {
-            let real_event = new_events[i];
-            points_are_close(real_event.position, expected_event.position);
-        }
-
-        assert!(new_intersections.is_empty());
-
-        let status_as_vec: Vec<usize> = status
-            .iter(0)
-            .flat_map(|node_type| {
-                if let NodeType::Value(curve_index) = node_type {
-                    Some(*curve_index)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let expected_status_vec = vec![1, 3, 4, 2, 0];
-
-        assert_eq!(status_as_vec, expected_status_vec);
     }
 
     #[test]
@@ -865,4 +388,263 @@ mod test {
 
         assert!(intersection_res.is_none());
     }
+
+    #[test]
+    fn start_points_are_correctly_inserted_into_status() {
+        let segments = [
+            [Point::new(-5.0, 12.0), Point::new(13.0, -0.2)],
+            [Point::new(2.0, 5.0), Point::new(-10.0, -5.0)],
+            [Point::new(2.0, 2.0), Point::new(0.0, -10.0)],
+        ];
+
+        let mut status = SkipList::new();
+
+        let mut new_events: Vec<EventPoint> = Vec::new();
+        let mut new_intersections = Vec::new();
+
+        for (i, segment) in segments.iter().enumerate() {
+            let event = EventPoint {
+                position: segment[0],
+                segment_indices: HashSet::from_iter(iter::once(i)),
+                event_type: EventPointType::StartPoint,
+            };
+
+            let (result_events, result_intersection) = update_status(&mut status, event, &segments);
+
+            new_events.extend(result_events.into_iter());
+            if let Some(intersection) = result_intersection {
+                new_intersections.push(intersection);
+            }
+        }
+
+        assert!(new_events.is_empty());
+        assert!(new_intersections.is_empty());
+
+        let status_as_vec = status.to_vec();
+
+        let expected_status_vec = vec![1, 2, 0];
+
+        assert_eq!(status_as_vec, expected_status_vec);
+    }
+
+    fn points_are_close(p_1: Point, p_2: Point) {
+        println!("--- {p_1:?} | {p_2:?}");
+        assert!((p_1 - p_2).norm() < 0.00001)
+    }
+
+    #[test]
+    fn start_points_correctly_calculate_single_future_intersection() {
+        let segments = [
+            [Point::new(-5.0, 12.0), Point::new(13.0, -0.2)],
+            [Point::new(2.0, 5.0), Point::new(-10.0, -5.0)],
+            [Point::new(-0.7, 1.5), Point::new(1.4, 0.0)],
+            [Point::new(1.0, 1.0), Point::new(2.0, -4.0)],
+        ];
+
+        let mut status = SkipList::new();
+
+        let mut new_events: Vec<EventPoint> = Vec::new();
+        let mut new_intersections = Vec::new();
+
+        for (i, segment) in segments.iter().enumerate() {
+            let event = EventPoint {
+                position: segment[0],
+                segment_indices: HashSet::from_iter(iter::once(i)),
+                event_type: EventPointType::StartPoint,
+            };
+
+            let (result_events, result_intersection) = update_status(&mut status, event, &segments);
+
+            new_events.extend(result_events.into_iter());
+            if let Some(intersection) = result_intersection {
+                new_intersections.push(intersection);
+            }
+        }
+
+        let expected_new_events = vec![EventPoint {
+            position: Point::new(1.16666667, 0.16666667),
+            segment_indices: HashSet::from_iter(iter::once(3)),
+            event_type: EventPointType::Intersection,
+        }];
+
+        assert_eq!(new_events.len(), expected_new_events.len());
+        for (i, expected_event) in expected_new_events.iter().enumerate() {
+            let real_event = &new_events[i];
+            points_are_close(real_event.position, expected_event.position);
+        }
+        assert!(new_intersections.is_empty());
+
+        let status_as_vec = status.to_vec();
+
+        let expected_status_vec = vec![1, 2, 3, 0];
+
+        assert_eq!(status_as_vec, expected_status_vec);
+    }
+
+    #[test]
+    fn start_points_correctly_calculate_double_future_intersection() {
+        let segments = [
+            [Point::new(-5.0, 12.0), Point::new(13.0, -0.2)],
+            [Point::new(2.0, 5.0), Point::new(-10.0, -5.0)],
+            [Point::new(2.0, 2.0), Point::new(0.0, -10.0)],
+            [Point::new(-0.7, 1.5), Point::new(1.4, 0.0)],
+            [Point::new(1.0, 1.0), Point::new(2.0, -4.0)],
+        ];
+
+        let mut status = SkipList::new();
+
+        let mut new_events: Vec<EventPoint> = Vec::new();
+        let mut new_intersections = Vec::new();
+
+        for (i, segment) in segments.iter().enumerate() {
+            let event = EventPoint {
+                position: segment[0],
+                segment_indices: HashSet::from_iter(iter::once(i)),
+                event_type: EventPointType::StartPoint,
+            };
+
+            let (result_events, result_intersection) = update_status(&mut status, event, &segments);
+
+            new_events.extend(result_events.into_iter());
+            if let Some(intersection) = result_intersection {
+                new_intersections.push(intersection);
+            }
+        }
+
+        let expected_new_events = vec![
+            EventPoint {
+                position: Point::new(1.16666667, 0.16666667),
+                segment_indices: HashSet::from_iter(iter::once(3)),
+                event_type: EventPointType::Intersection,
+            },
+            EventPoint {
+                position: Point::new(1.45454545, -1.27272727),
+                segment_indices: HashSet::from_iter(iter::once(3)),
+                event_type: EventPointType::Intersection,
+            },
+        ];
+
+        assert_eq!(new_events.len(), expected_new_events.len());
+        for (i, expected_event) in expected_new_events.iter().enumerate() {
+            let real_event = &new_events[i];
+            points_are_close(real_event.position, expected_event.position);
+        }
+
+        assert!(new_intersections.is_empty());
+
+        let status_as_vec = status.to_vec();
+
+        let expected_status_vec = vec![1, 3, 4, 2, 0];
+
+        assert_eq!(status_as_vec, expected_status_vec);
+    }
+
+    #[test]
+    fn start_points_correctly_identify_single_start_intersection() {
+        let segments = [
+            [Point::new(-5.0, 12.0), Point::new(13.0, -0.2)],
+            [Point::new(2.0, 5.0), Point::new(-10.0, -5.0)],
+            [Point::new(1.0, 1.0), Point::new(1.4, 0.0)],
+            [Point::new(1.0, 1.0), Point::new(2.0, -4.0)],
+        ];
+
+        let mut status = SkipList::new();
+
+        let mut new_events: Vec<EventPoint> = Vec::new();
+        let mut new_intersections = Vec::new();
+
+        for (i, segment) in segments[..3].iter().enumerate() {
+            let event = EventPoint {
+                position: segment[0],
+                segment_indices: if i == 2 {
+                    HashSet::from_iter(vec![i, i + 1])
+                } else {
+                    HashSet::from_iter(iter::once(i))
+                },
+                event_type: EventPointType::StartPoint,
+            };
+
+            let (result_events, result_intersection) = update_status(&mut status, event, &segments);
+
+            new_events.extend(result_events.into_iter());
+            if let Some(intersection) = result_intersection {
+                new_intersections.push(intersection);
+            }
+        }
+
+        let expected_intersections = vec![IntersectionPoint {
+            position: Point::new(1.0, 1.0),
+            intersecting_segment_indices: vec![3, 2],
+        }];
+
+        // Uncertainty in the order of elements is caused by the use of hashsets, either order is
+        // valid and should not affect algorithm performance
+
+        assert_eq!(new_intersections.len(), 1);
+        assert_eq!(
+            new_intersections[0].position,
+            expected_intersections[0].position
+        );
+        assert_eq!(
+            HashSet::<&usize>::from_iter(new_intersections[0].intersecting_segment_indices.iter()),
+            HashSet::from_iter(
+                expected_intersections[0]
+                    .intersecting_segment_indices
+                    .iter()
+            )
+        );
+
+        assert!(new_events.is_empty());
+
+        let status_as_vec = status.to_vec();
+
+        let expected_status_vec_1 = vec![1, 2, 3, 0];
+        let expected_status_vec_2 = vec![1, 3, 2, 0];
+
+        assert!(status_as_vec == expected_status_vec_1 || status_as_vec == expected_status_vec_2);
+    }
+
+    /* #[test]
+    fn start_points_correctly_identify_double_start_intersection() {
+        let segments = [
+            [Point::new(-5.0, 12.0), Point::new(13.0, -0.2)],
+            [Point::new(2.0, 5.0), Point::new(-10.0, -5.0)],
+            [Point::new(1.0, 1.0), Point::new(1.4, 0.0)],
+            [Point::new(1.0, 1.0), Point::new(2.0, -4.0)],
+        ];
+
+        let mut status = SkipList::new();
+
+        let mut new_events: Vec<EventPoint> = Vec::new();
+        let mut new_intersections = Vec::new();
+
+        for (i, segment) in segments.iter().enumerate() {
+            let event = EventPoint {
+                position: segment[0],
+                segment_indices: HashSet::from_iter(iter::once(i)),
+                event_type: EventPointType::StartPoint,
+            };
+
+            let (result_events, result_intersection) = update_status(&mut status, event, &segments);
+
+            new_events.extend(result_events.into_iter());
+            if let Some(intersection) = result_intersection {
+                new_intersections.push(intersection);
+            }
+        }
+
+        let expected_intersections = vec![IntersectionPoint {
+            position: Point::new(1.0, 1.0),
+            intersecting_segment_indices: vec![3, 2],
+        }];
+
+        assert_eq!(new_intersections, expected_intersections);
+        assert!(new_events.is_empty());
+
+        let status_as_vec = status_to_vec(&status);
+
+        let expected_status_vec = vec![1, 2, 3, 0];
+
+        assert_eq!(status_as_vec, expected_status_vec);
+    } */
 }
