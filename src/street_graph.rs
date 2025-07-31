@@ -10,7 +10,7 @@ struct IntersectionPoint {
     intersecting_segment_indices: Vec<usize>,
 }
 
-#[derive(PartialEq, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct EventPoint {
     position: Point,
     segment_indices: HashSet<usize>,
@@ -42,12 +42,18 @@ impl EventPoint {
         self.event_type
     }
 
-    pub fn add_segments(&mut self, segment_indices: &HashSet<usize>) {
-        self.segment_indices = self
-            .segment_indices
-            .union(segment_indices)
-            .copied()
-            .collect();
+    pub fn add_segments(event: std::ptr::NonNull<cool_utils::data_structures::rbtree::Node<Self>>, segment_indices: &HashSet<usize>) {
+        unsafe {
+            (*event.as_ptr()).value.segment_indices = (*event.as_ptr()).value
+                .segment_indices
+                .union(segment_indices)
+                .copied()
+                .collect();
+        }
+    }
+
+    pub fn test(&mut self) {
+
     }
 }
 
@@ -60,12 +66,20 @@ pub enum EventPointType {
 
 impl Eq for EventPoint {}
 
+impl PartialEq for EventPoint {
+    fn eq(&self, other: &Self) -> bool {
+        self.event_type == other.event_type
+            && (other.position - self.position).norm_squared() < 0.01
+    }
+}
+
 impl PartialOrd for EventPoint {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match self.position.y.partial_cmp(&other.position.y) {
             Some(y_comp) => {
                 if y_comp == std::cmp::Ordering::Equal {
-                    std::cmp::Reverse(self.position.x).partial_cmp(&std::cmp::Reverse(other.position.x))
+                    std::cmp::Reverse(self.position.x)
+                        .partial_cmp(&std::cmp::Reverse(other.position.x))
                 } else {
                     Some(y_comp)
                 }
@@ -77,7 +91,7 @@ impl PartialOrd for EventPoint {
 
 impl Ord for EventPoint {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap_or(Ordering::Equal)
+        self.partial_cmp(other).unwrap_or(Ordering::Greater)
     }
 }
 
