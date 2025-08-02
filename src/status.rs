@@ -26,10 +26,6 @@ impl SkipList {
         }
     }
 
-    pub fn height(&self) -> usize {
-        unsafe { (*self.nodes.as_ptr()).next_ptrs.len() }
-    }
-
     pub fn insert(
         &mut self,
         element: usize,
@@ -58,11 +54,17 @@ impl SkipList {
         }
     }
 
-    pub fn remove(&mut self, element: usize, segments: &[Segment], height: f32) -> bool {
+    pub fn remove(
+        &mut self,
+        element: usize,
+        segments: &[Segment],
+        height: f32,
+    ) -> (Option<usize>, Option<usize>) {
         unsafe {
+            let list_height = (*self.nodes.as_ptr()).next_ptrs.len();
             let (traverse_target, _) = Node::traverse_level(
                 self.nodes,
-                self.height() - 1,
+                list_height - 1,
                 element.clone(),
                 segments,
                 height,
@@ -88,10 +90,88 @@ impl SkipList {
 
                 self.len -= 1;
 
-                true
+                let prev_node = boxed_target.prev_ptrs[0];
+                let next_node = boxed_target.next_ptrs[0];
+
+                (
+                    if let NodeType::Value(prev) = (*prev_node.as_ptr()).node_type {
+                        Some(prev)
+                    } else {
+                        None
+                    },
+                    if let NodeType::Value(next) = (*next_node.as_ptr()).node_type {
+                        Some(next)
+                    } else {
+                        None
+                    },
+                )
             } else {
-                false
+                (None, None)
             }
+        }
+    }
+
+    pub fn reverse(
+        &mut self,
+        low: usize,
+        high: usize,
+        segments: &[Segment],
+        height: f32,
+    ) -> (Option<usize>, Option<usize>) {
+        assert_ne!(low, high);
+
+        unsafe {
+            let (low_node, _) = Node::traverse_level(
+                self.nodes,
+                (*self.nodes.as_ptr()).next_ptrs.len() - 1,
+                low,
+                segments,
+                height,
+            );
+
+            let mut high_node = (&(*low_node.as_ptr()).next_ptrs)[0];
+            while (*high_node.as_ptr()).node_type != NodeType::Value(high) {
+                high_node = (&(*high_node.as_ptr()).next_ptrs)[0];
+            }
+
+            self.reverse_helper(low_node, high_node);
+
+            (
+                if let NodeType::Value(left) =
+                    (*(&(*low_node.as_ptr()).prev_ptrs)[0].as_ptr()).node_type
+                {
+                    Some(left)
+                } else {
+                    None
+                },
+                if let NodeType::Value(right) =
+                    (*(&(*high_node.as_ptr()).next_ptrs)[0].as_ptr()).node_type
+                {
+                    Some(right)
+                } else {
+                    None
+                },
+            )
+        }
+    }
+
+    fn reverse_helper(&mut self, low: Link, high: Link) {
+        unsafe {
+            assert_ne!((*low.as_ptr()).node_type, NodeType::End);
+            assert_ne!((*high.as_ptr()).node_type, NodeType::Start);
+
+            if (*low.as_ptr()).node_type == (*high.as_ptr()).node_type {
+                return;
+            }
+
+            std::mem::swap(
+                &mut (*low.as_ptr()).node_type,
+                &mut (*high.as_ptr()).node_type,
+            );
+            self.reverse_helper(
+                (&(*low.as_ptr()).next_ptrs)[0],
+                (&(*high.as_ptr()).prev_ptrs)[0],
+            );
         }
     }
 
@@ -262,9 +342,26 @@ pub enum NodeType {
     Value(usize),
     End,
 }
-fn get_x_val_of_segment_at_height(segment: &Segment, height: f32) -> f32 {
+
+pub fn get_x_val_of_segment_at_height(segment: &Segment, height: f32) -> f32 {
     segment[0].x
         + ((height - segment[0].y) / (segment[1] - segment[0]).y) * (segment[1] - segment[0]).x
+}
+
+impl PartialEq for NodeType {
+    fn eq(&self, other: &Self) -> bool {
+        match self {
+            NodeType::Start => other == &NodeType::Start,
+            NodeType::Value(lhs) => {
+                if let NodeType::Value(rhs) = other {
+                    lhs == rhs
+                } else {
+                    false
+                }
+            }
+            NodeType::End => other == &NodeType::End,
+        }
+    }
 }
 
 impl NodeType {

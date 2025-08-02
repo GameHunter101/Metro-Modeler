@@ -4,16 +4,14 @@ use cool_utils::data_structures::rbtree::{Node, RBTree};
 
 use crate::street_graph::EventPoint;
 
-type Link = NonNull<Node<EventPoint>>;
-
 pub struct EventQueue {
     tree: RBTree<EventPoint>,
-    arr: Vec<Link>,
+    arr: Vec<NonNull<Node<EventPoint>>>,
     len: usize,
 }
 
 impl EventQueue {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             tree: RBTree::new(),
             arr: Vec::new(),
@@ -52,11 +50,10 @@ impl EventQueue {
         }
     }
 
-    fn push(&mut self, event_point: EventPoint) {
+    pub fn push(&mut self, event_point: EventPoint) {
         unsafe {
             if let Some(node) = self.tree.unsafe_search(&event_point) {
-                EventPoint::add_segments(node, event_point.segment_indices());
-                // (*node.as_ptr()).value).add_segments(event_point.segment_indices());
+                (&mut (*node.as_ptr()).value).add_segments(event_point.segment_indices());
             } else {
                 let ptr = self.tree.unsafe_insert(event_point);
                 self.arr.push(ptr);
@@ -95,11 +92,12 @@ impl EventQueue {
         }
     }
 
-    fn pop(&mut self) {
+    pub fn pop(&mut self) -> Option<EventPoint> {
         if self.len == 0 {
-            return;
+            return None;
         }
         let node_ptr = if self.len == 1 {
+            self.len -= 1;
             self.arr.pop().unwrap()
         } else {
             self.swap(0, self.len - 1);
@@ -109,7 +107,12 @@ impl EventQueue {
             val
         };
         unsafe {
-            self.tree.delete(&(*node_ptr.as_ptr()).value.clone());
+            let value = (*node_ptr.as_ptr()).value.clone();
+            if self.tree.delete(&value) {
+                Some(value)
+            } else {
+                None
+            }
         }
     }
 
@@ -340,10 +343,7 @@ mod test {
             assert_eq!(segments.len(), 2);
             assert!(segments.contains(&0));
             assert!(segments.contains(&1));
-            assert_eq!(
-                val.event_type(),
-                crate::street_graph::EventPointType::StartPoint
-            );
+            assert_eq!(val.event_type(), EventPointType::StartPoint);
         }
     }
 
@@ -387,5 +387,33 @@ mod test {
             assert!(segments.contains(&2));
             assert_eq!(val.event_type(), EventPointType::StartPoint);
         }
+    }
+
+    #[test]
+    fn inserting_multiple_different_types_of_intersecting_segments_dont_get_merged() {
+        let mut queue = EventQueue::new();
+
+        queue.push(EventPoint::new(
+            Point::new(0.0, 0.0),
+            HashSet::from_iter(iter::once(0)),
+            EventPointType::StartPoint,
+        ));
+        queue.push(EventPoint::new(
+            Point::new(0.0, 0.0),
+            HashSet::from_iter(iter::once(1)),
+            EventPointType::Intersection,
+        ));
+        queue.push(EventPoint::new(
+            Point::new(12.0, -5.0),
+            HashSet::from_iter(iter::once(5)),
+            EventPointType::EndPoint,
+        ));
+        queue.push(EventPoint::new(
+            Point::new(0.0, 0.0),
+            HashSet::from_iter(iter::once(2)),
+            EventPointType::EndPoint,
+        ));
+
+        assert_eq!(queue.len(), 4);
     }
 }
