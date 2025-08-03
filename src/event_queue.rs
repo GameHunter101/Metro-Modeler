@@ -116,14 +116,14 @@ impl EventQueue {
         }
     }
 
-    fn to_vec(&self) -> Vec<EventPoint> {
+    pub fn to_vec(&self) -> Vec<EventPoint> {
         self.arr
             .iter()
             .map(|ptr| unsafe { (*ptr.as_ptr()).value.clone() })
             .collect()
     }
 
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.len
     }
 }

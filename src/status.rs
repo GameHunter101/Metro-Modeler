@@ -134,7 +134,10 @@ impl SkipList {
                 high_node = (&(*high_node.as_ptr()).next_ptrs)[0];
             }
 
-            self.reverse_helper(low_node, high_node);
+            self.reverse_helper(
+                low_node,
+                high_node,
+            );
 
             (
                 if let NodeType::Value(left) =
@@ -155,12 +158,16 @@ impl SkipList {
         }
     }
 
-    fn reverse_helper(&mut self, low: Link, high: Link) {
+    fn reverse_helper(
+        &mut self,
+        low: Link,
+        high: Link,
+    ) {
         unsafe {
             assert_ne!((*low.as_ptr()).node_type, NodeType::End);
             assert_ne!((*high.as_ptr()).node_type, NodeType::Start);
-
-            if (*low.as_ptr()).node_type == (*high.as_ptr()).node_type {
+            if low == high || (&(*low.as_ptr()).prev_ptrs)[0] == high || (&(*high.as_ptr()).next_ptrs)[0] == low
+            {
                 return;
             }
 
@@ -168,6 +175,7 @@ impl SkipList {
                 &mut (*low.as_ptr()).node_type,
                 &mut (*high.as_ptr()).node_type,
             );
+
             self.reverse_helper(
                 (&(*low.as_ptr()).next_ptrs)[0],
                 (&(*high.as_ptr()).prev_ptrs)[0],
@@ -344,8 +352,12 @@ pub enum NodeType {
 }
 
 pub fn get_x_val_of_segment_at_height(segment: &Segment, height: f32) -> f32 {
-    segment[0].x
-        + ((height - segment[0].y) / (segment[1] - segment[0]).y) * (segment[1] - segment[0]).x
+    if segment[1].y == segment[0].y {
+        segment[0].x.min(segment[1].x)
+    } else {
+        segment[0].x
+            + ((height - segment[0].y) / (segment[1] - segment[0]).y) * (segment[1] - segment[0]).x
+    }
 }
 
 impl PartialEq for NodeType {
