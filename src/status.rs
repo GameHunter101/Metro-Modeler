@@ -134,10 +134,7 @@ impl SkipList {
                 high_node = (&(*high_node.as_ptr()).next_ptrs)[0];
             }
 
-            self.reverse_helper(
-                low_node,
-                high_node,
-            );
+            self.reverse_helper(low_node, high_node);
 
             (
                 if let NodeType::Value(left) =
@@ -158,15 +155,13 @@ impl SkipList {
         }
     }
 
-    fn reverse_helper(
-        &mut self,
-        low: Link,
-        high: Link,
-    ) {
+    fn reverse_helper(&mut self, low: Link, high: Link) {
         unsafe {
             assert_ne!((*low.as_ptr()).node_type, NodeType::End);
             assert_ne!((*high.as_ptr()).node_type, NodeType::Start);
-            if low == high || (&(*low.as_ptr()).prev_ptrs)[0] == high || (&(*high.as_ptr()).next_ptrs)[0] == low
+            if low == high
+                || (&(*low.as_ptr()).prev_ptrs)[0] == high
+                || (&(*high.as_ptr()).next_ptrs)[0] == low
             {
                 return;
             }
