@@ -1,8 +1,11 @@
-use std::ptr::NonNull;
+use std::{collections::HashSet, ptr::NonNull};
 
 use cool_utils::data_structures::rbtree::{Node, RBTree};
 
-use crate::street_graph::EventPoint;
+use crate::{
+    street_graph::{EventPoint, EventPointType, Segment},
+    tensor_field::Point,
+};
 
 pub struct EventQueue {
     tree: RBTree<EventPoint>,
@@ -17,6 +20,38 @@ impl EventQueue {
             arr: Vec::new(),
             len: 0,
         }
+    }
+
+    pub fn from_segments(segments: &[Segment]) -> Self {
+        let mut event_queue = EventQueue::new();
+        for (i, segment) in segments.iter().enumerate() {
+            let (start, end) = if segment[0].y > segment[1].y {
+                (segment[0], segment[1])
+            } else {
+                if segment[0].y == segment[1].y && segment[0].x < segment[1].x {
+                    (segment[0], segment[1])
+                } else {
+                    (segment[1], segment[0])
+                }
+            };
+
+            let start_event = EventPoint {
+                position: start,
+                segment_indices: HashSet::from_iter(std::iter::once(i)),
+                event_type: EventPointType::StartPoint,
+            };
+
+            let end_event = EventPoint {
+                position: end,
+                segment_indices: HashSet::from_iter(std::iter::once(i)),
+                event_type: EventPointType::EndPoint,
+            };
+
+            event_queue.push(start_event);
+            event_queue.push(end_event);
+        }
+
+        event_queue
     }
 
     fn swap(&mut self, a: usize, b: usize) {
@@ -87,7 +122,7 @@ impl EventQueue {
 
             if (*self.arr[start_index].as_ptr()).value < (*max_val.as_ptr()).value {
                 self.swap(start_index, max_index);
-                self.sift_down(start_index);
+                self.sift_down(max_index);
             }
         }
     }
