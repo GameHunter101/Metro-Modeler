@@ -54,6 +54,18 @@ impl EventQueue {
         event_queue
     }
 
+    pub fn print(&self) {
+        unsafe {
+            println!(
+                "{:?}",
+                self.arr
+                    .iter()
+                    .map(|ptr| &(*ptr.as_ptr()).value)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
     fn swap(&mut self, a: usize, b: usize) {
         assert!(a != b);
         let (a_ref, b_ref) = if a < b {
