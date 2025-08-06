@@ -192,7 +192,7 @@ pub fn trace_street_plan(
     iter_count: usize,
     previous_major_curves: Vec<HermiteCurve>,
     previous_minor_curves: Vec<HermiteCurve>,
-) -> (Vec<Vec<ControlPoint>>, Vec<Vec<ControlPoint>>) {
+) -> (Vec<HermiteCurve>, Vec<HermiteCurve>) {
     let mut seed_points = match seeds {
         TraceSeeds::Random(starting_seed_count) => {
             let temp_points = [

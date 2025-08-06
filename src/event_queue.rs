@@ -2,10 +2,7 @@ use std::{collections::HashSet, ptr::NonNull};
 
 use cool_utils::data_structures::rbtree::{Node, RBTree};
 
-use crate::{
-    street_graph::{EventPoint, EventPointType, Segment},
-    tensor_field::Point,
-};
+use crate::street_graph::{EventPoint, EventPointType, Segment};
 
 pub struct EventQueue {
     tree: RBTree<EventPoint>,
@@ -35,17 +32,17 @@ impl EventQueue {
                 }
             };
 
-            let start_event = EventPoint {
-                position: start,
-                segment_indices: HashSet::from_iter(std::iter::once(i)),
-                event_type: EventPointType::StartPoint,
-            };
+            let start_event = EventPoint::new(
+                start,
+                HashSet::from_iter(std::iter::once(i)),
+                EventPointType::StartPoint,
+            );
 
-            let end_event = EventPoint {
-                position: end,
-                segment_indices: HashSet::from_iter(std::iter::once(i)),
-                event_type: EventPointType::EndPoint,
-            };
+            let end_event = EventPoint::new(
+                end,
+                HashSet::from_iter(std::iter::once(i)),
+                EventPointType::EndPoint,
+            );
 
             event_queue.push(start_event);
             event_queue.push(end_event);
@@ -163,11 +160,41 @@ impl EventQueue {
         }
     }
 
+    pub fn check(&self) -> bool {
+        unsafe {
+            (0..self.arr.len()).all(|i| {
+                let val = &(*self.arr[i].as_ptr()).value;
+                let left_child = self.arr.get(2 * i + 1).map(|x| &(*x.as_ptr()).value);
+                let right_child = self.arr.get(2 * i + 2).map(|x| &(*x.as_ptr()).value);
+
+                let left_res = if let Some(left) = left_child {
+                    val > left
+                } else {
+                    true
+                };
+                let right_res = if let Some(right) = right_child {
+                    val > right
+                } else {
+                    true
+                };
+                left_res && right_res
+            })
+        }
+    }
+
     pub fn to_vec(&self) -> Vec<EventPoint> {
         self.arr
             .iter()
             .map(|ptr| unsafe { (*ptr.as_ptr()).value.clone() })
             .collect()
+    }
+
+    pub fn into_ordered_vec(mut self) -> Vec<EventPoint> {
+        let mut vec = Vec::new();
+        while let Some(element) = self.pop() {
+            vec.push(element);
+        }
+        vec
     }
 
     pub fn len(&self) -> usize {

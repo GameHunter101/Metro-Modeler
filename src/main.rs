@@ -1,6 +1,6 @@
 use image::{EncodableLayout, ImageBuffer};
 use nalgebra::Vector2;
-use street_graph::test_status;
+use street_graph::find_interesctions;
 use street_plan::{SeedPoint, merge_road_endings, resample_curve, trace_street_plan};
 use tensor_field::{DesignElement, EvalEigenvectors, GRID_SIZE, Point, TensorField};
 use v4::{
@@ -18,7 +18,6 @@ mod tensor_field;
 
 #[tokio::main]
 async fn main() {
-    test_status();
     let start_time = std::time::Instant::now();
     let grid_element = DesignElement::Grid {
         center: Vector2::new(100.0, 100.0),
@@ -96,6 +95,40 @@ async fn main() {
 
     let major_network = major_network.unwrap();
 
+    let all_curves: Vec<_> = major_network_major_curves
+        .iter()
+        .chain(&major_network_minor_curves)
+        .map(|curve| {
+            curve
+                .into_iter()
+                .map(|pos| pos.position)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    let major_network_segments: Vec<[Point; 2]> = all_curves
+        .iter()
+        .flat_map(|curve| {
+            curve[..curve.len() - 1]
+                .into_iter()
+                .enumerate()
+                .map(|(i, point)| [*point, curve[i + 1]])
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    // println!("{major_network_segments:?}");
+    println!("Starting to find intersections");
+    let major_intersections = find_interesctions(&major_network_segments);
+    println!("Done with intersections");
+
+    println!(
+        "{:?}",
+        major_intersections
+            .iter()
+            .map(|street_graph::IntersectionPoint { position, .. }| { position })
+            .collect::<Vec<_>>()
+    );
+
     let (minor_network_major_curves_unconnected, minor_network_minor_curves_unconnected) =
         trace_street_plan(
             &tensor_field,
@@ -134,7 +167,7 @@ async fn main() {
     println!("{}", start_time.elapsed().as_millis() as f32 / 1000.0);
 
     let mut engine = v4::V4::builder()
-        .features(wgpu::Features::POLYGON_MODE_LINE)
+        .features(wgpu::Features::POLYGON_MODE_LINE | wgpu::Features::POLYGON_MODE_POINT)
         .window_settings(
             GRID_SIZE as u32 * 2,
             GRID_SIZE as u32 * 2,
@@ -282,7 +315,39 @@ async fn main() {
                 )
             ]
         },
-        "minor_network" = {
+        "major_intersections" = {
+            material: {
+                pipeline: {
+                    vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
+                    fragment_shader_path: "./shaders/visualizer_fragment.wgsl",
+                    vertex_layouts: [Vertex::vertex_layout()],
+                    uses_camera: false,
+                    geometry_details: {
+                        topology: wgpu::PrimitiveTopology::PointList,
+                        polygon_mode: wgpu::PolygonMode::Point,
+                    },
+                    ident: "network_pipeline",
+                }
+            },
+            components: [
+                MeshComponent(
+                    vertices:
+                        vec![major_intersections.iter().map(|intersection| {
+                            let pos = intersection.position();
+                            Vertex {
+                                pos: [
+                                    2.0 * pos.x / GRID_SIZE as f32 - 1.0,
+                                    2.0 * pos.y / GRID_SIZE as f32 - 1.0,
+                                    0.0,
+                                ],
+                                col: [0.0, 1.0, 0.0, 1.0]
+                            }
+                        }).collect()],
+                    enabled_models: vec![(0, None)]
+                )
+            ]
+        }
+        /* "minor_network" = {
             material: {
                 pipeline: ident("network_pipeline"),
             },
@@ -304,7 +369,7 @@ async fn main() {
                     enabled_models: minor_network.iter().enumerate().map(|(i, _)| (i, None)).collect()
                 )
             ]
-        }
+        } */
     }
 
     engine.attach_scene(visualizer);

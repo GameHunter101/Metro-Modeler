@@ -39,6 +39,7 @@ impl SkipList {
                 element.clone(),
                 segments,
                 height,
+                false,
             );
 
             self.len += 1;
@@ -68,6 +69,7 @@ impl SkipList {
                 element.clone(),
                 segments,
                 height,
+                true,
             );
 
             if (*traverse_target.as_ptr()).node_type.cmp(
@@ -120,6 +122,15 @@ impl SkipList {
     ) -> (Option<usize>, Option<usize>) {
         assert_ne!(low, high);
 
+        let low_start = segments[low][0].y.max(segments[low][1].y);
+        let high_start = segments[high][0].y.max(segments[high][1].y);
+        let min_start = low_start.min(high_start);
+
+        assert!(
+            get_x_val_of_segment_at_height(&segments[low], min_start)
+                < get_x_val_of_segment_at_height(&segments[high], min_start)
+        );
+
         unsafe {
             let (low_node, _) = Node::traverse_level(
                 self.nodes,
@@ -127,6 +138,7 @@ impl SkipList {
                 low,
                 segments,
                 height,
+                true,
             );
 
             let mut high_node = (&(*low_node.as_ptr()).next_ptrs)[0];
@@ -250,6 +262,7 @@ impl Node {
         element: usize,
         segments: &[Segment],
         height: f32,
+        precise_search: bool,
     ) -> (Link, Vec<Link>) {
         unsafe {
             if let Some(next) = start.as_ref().next_ptrs.get(level).copied() {
@@ -259,15 +272,37 @@ impl Node {
                     == Ordering::Greater
                 {
                     if level == 0 {
-                        (start, Vec::new())
+                        if (*start.as_ptr()).node_type.cmp(
+                            &NodeType::Value(element),
+                            segments,
+                            height,
+                        ) == Ordering::Equal
+                        {
+                            let mut refine = start;
+                            while let Some(refine_prev) = (&(*refine.as_ptr()).prev_ptrs).get(0)
+                                && (*refine.as_ptr()).node_type != NodeType::Value(element)
+                                && precise_search
+                            {
+                                refine = *refine_prev;
+                            }
+                            (refine, Vec::new())
+                        } else {
+                            (start, Vec::new())
+                        }
                     } else {
-                        let (node, mut path) =
-                            Self::traverse_level(start, level - 1, element, segments, height);
+                        let (node, mut path) = Self::traverse_level(
+                            start,
+                            level - 1,
+                            element,
+                            segments,
+                            height,
+                            precise_search,
+                        );
                         path.push(start);
                         (node, path)
                     }
                 } else {
-                    Self::traverse_level(next, level, element, segments, height)
+                    Self::traverse_level(next, level, element, segments, height, precise_search)
                 }
             } else {
                 (start, Vec::new())
@@ -383,7 +418,11 @@ impl NodeType {
                     } else {
                         let lhs_x = get_x_val_of_segment_at_height(&segments[*lhs], height);
                         let rhs_x = get_x_val_of_segment_at_height(&segments[*rhs], height);
-                        lhs_x.partial_cmp(&rhs_x).unwrap_or(Ordering::Less)
+                        if (rhs_x - lhs_x).abs() < 0.0001 {
+                            Ordering::Equal
+                        } else {
+                            lhs_x.partial_cmp(&rhs_x).unwrap_or(Ordering::Less)
+                        }
                     }
                 }
                 NodeType::End => Ordering::Less,
