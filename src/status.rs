@@ -2,7 +2,7 @@ use std::{cmp::Ordering, ptr::NonNull};
 
 use rand::prelude::*;
 
-use crate::street_graph::Segment;
+use crate::street_graph::{Segment, points_are_close, segment_end, segment_start};
 
 type Link = NonNull<Node>;
 
@@ -43,6 +43,42 @@ impl SkipList {
             );
 
             self.len += 1;
+
+            if let NodeType::Value(appending_index) = (*traverse_node.as_ptr()).node_type
+                && NodeType::Value(appending_index).cmp(&NodeType::Value(element), segments, height)
+                    == Ordering::Equal
+            {
+                let appending_segment = segments[appending_index];
+                let target_segment = segments[element];
+
+                let appending_end_point = segment_end(appending_segment);
+                let target_end_point = segment_end(target_segment);
+
+                let target_start = segment_start(segments[element]);
+
+                if !points_are_close(appending_end_point, target_start) {
+                    let highest_end = target_end_point.y.max(appending_end_point.y);
+
+                    let target_x_at_highest_end =
+                        get_x_val_of_segment_at_height(target_segment, highest_end);
+                    let appending_x_at_highest_end =
+                        get_x_val_of_segment_at_height(appending_segment, highest_end);
+
+                    if target_x_at_highest_end < appending_x_at_highest_end {
+                        return Node::append(
+                            self.nodes,
+                            self.end,
+                            (&(*traverse_node.as_ptr()).prev_ptrs)[0],
+                            element,
+                            traverse_path
+                                .into_iter()
+                                .filter(|ptr| *ptr != traverse_node)
+                                .collect(),
+                            &mut self.rng,
+                        );
+                    }
+                }
+            }
 
             Node::append(
                 self.nodes,
@@ -127,8 +163,8 @@ impl SkipList {
         let min_start = low_start.min(high_start);
 
         assert!(
-            get_x_val_of_segment_at_height(&segments[low], min_start)
-                < get_x_val_of_segment_at_height(&segments[high], min_start)
+            get_x_val_of_segment_at_height(segments[low], min_start)
+                < get_x_val_of_segment_at_height(segments[high], min_start)
         );
 
         unsafe {
@@ -381,7 +417,7 @@ pub enum NodeType {
     End,
 }
 
-pub fn get_x_val_of_segment_at_height(segment: &Segment, height: f32) -> f32 {
+pub fn get_x_val_of_segment_at_height(segment: Segment, height: f32) -> f32 {
     if segment[1].y == segment[0].y {
         segment[0].x.min(segment[1].x)
     } else {
@@ -416,8 +452,8 @@ impl NodeType {
                     if rhs == lhs {
                         Ordering::Equal
                     } else {
-                        let lhs_x = get_x_val_of_segment_at_height(&segments[*lhs], height);
-                        let rhs_x = get_x_val_of_segment_at_height(&segments[*rhs], height);
+                        let lhs_x = get_x_val_of_segment_at_height(segments[*lhs], height);
+                        let rhs_x = get_x_val_of_segment_at_height(segments[*rhs], height);
                         if (rhs_x - lhs_x).abs() < 0.0001 {
                             Ordering::Equal
                         } else {

@@ -49,14 +49,27 @@ async fn main() {
         0.0004,
     );
 
-    let (major_network_major_curves, major_network_minor_curves) = trace_street_plan(
-        &tensor_field,
-        street_plan::TraceSeeds::Random(30),
-        city_center,
-        30.0,
-        5,
-        Vec::new(),
-        Vec::new(),
+    let (major_network_major_curves_unconnected, major_network_minor_curves_unconnected) =
+        trace_street_plan(
+            &tensor_field,
+            street_plan::TraceSeeds::Random(30),
+            city_center,
+            30.0,
+            5,
+            Vec::new(),
+            Vec::new(),
+        );
+
+    let major_network_merge_distance = 10.0;
+    let major_network_major_curves = merge_road_endings(
+        &major_network_major_curves_unconnected,
+        &major_network_minor_curves_unconnected,
+        major_network_merge_distance,
+    );
+    let major_network_minor_curves = merge_road_endings(
+        &major_network_minor_curves_unconnected,
+        &major_network_major_curves,
+        major_network_merge_distance,
     );
 
     let minor_network_seed_points: Vec<SeedPoint> = major_network_major_curves
@@ -116,7 +129,10 @@ async fn main() {
                 .collect::<Vec<_>>()
         })
         .collect();
-    // println!("{major_network_segments:?}");
+    /* println!(
+        "{:?}",
+        major_network_segments.iter().flat_map(|segment| [(segment[0].x, segment[0].y), (segment[1].x, segment[1].y)]).collect::<Vec<_>>()
+    ); */
     println!("Starting to find intersections");
     let major_intersections = find_interesctions(&major_network_segments);
     println!("Done with intersections");
@@ -125,7 +141,24 @@ async fn main() {
         "{:?}",
         major_intersections
             .iter()
-            .map(|street_graph::IntersectionPoint { position, .. }| { position })
+            .flat_map(
+                |street_graph::IntersectionPoint {
+                     position,
+                     intersecting_segment_indices,
+                 }| {
+                    if intersecting_segment_indices.len() == 2
+                        && (intersecting_segment_indices[0] as i32
+                            - intersecting_segment_indices[1] as i32)
+                            .abs()
+                            == 1
+                    {
+                        None
+                    } else {
+                        Some((position.x, position.y))
+                    }
+                }
+            )
+            // .map(|pos| (pos.position.x, pos.position.y))
             .collect::<Vec<_>>()
     );
 
@@ -140,16 +173,16 @@ async fn main() {
             major_network_minor_curves,
         );
 
-    let merge_distance = 7.0;
+    let minor_network_merge_distance = 7.0;
     let minor_network_major_curves = merge_road_endings(
         &minor_network_major_curves_unconnected,
         &minor_network_minor_curves_unconnected,
-        merge_distance,
+        minor_network_merge_distance,
     );
     let minor_network_minor_curves = merge_road_endings(
         &minor_network_minor_curves_unconnected,
         &minor_network_major_curves,
-        merge_distance,
+        minor_network_merge_distance,
     );
 
     let minor_network: Result<Vec<Vec<Point>>, tokio::task::JoinError> = futures::future::join_all(
@@ -326,7 +359,6 @@ async fn main() {
                         topology: wgpu::PrimitiveTopology::PointList,
                         polygon_mode: wgpu::PolygonMode::Point,
                     },
-                    ident: "network_pipeline",
                 }
             },
             components: [
@@ -346,8 +378,8 @@ async fn main() {
                     enabled_models: vec![(0, None)]
                 )
             ]
-        }
-        /* "minor_network" = {
+        },
+        "minor_network" = {
             material: {
                 pipeline: ident("network_pipeline"),
             },
@@ -369,7 +401,7 @@ async fn main() {
                     enabled_models: minor_network.iter().enumerate().map(|(i, _)| (i, None)).collect()
                 )
             ]
-        } */
+        }
     }
 
     engine.attach_scene(visualizer);

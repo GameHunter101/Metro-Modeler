@@ -110,19 +110,45 @@ impl Ord for EventPoint {
 
 pub type Segment = [Point; 2];
 
+pub fn segment_start(segment: Segment) -> Point {
+    if segment[0].y > segment[1].y {
+        segment[0]
+    } else if segment[0].y == segment[1].y {
+        if segment[0].x < segment[1].x {
+            segment[0]
+        } else {
+            segment[1]
+        }
+    } else {
+        segment[1]
+    }
+}
+
+pub fn segment_end(segment: Segment) -> Point {
+    if segment[0].y > segment[1].y {
+        segment[1]
+    } else if segment[0].y == segment[1].y {
+        if segment[0].x < segment[1].x {
+            segment[1]
+        } else {
+            segment[0]
+        }
+    } else {
+        segment[0]
+    }
+}
+
 pub fn find_interesctions(segments: &[Segment]) -> Vec<IntersectionPoint> {
     let mut event_queue = EventQueue::from_segments(segments);
     let mut status = SkipList::new();
 
     let mut intersections = Vec::new();
-    let mut last_event = None;
 
     while let Some(event) = event_queue.pop() {
         let (new_events, possible_intersection) = update_status(
             &mut status,
             event.clone(),
             segments,
-            last_event,
             intersections.last_mut(),
         );
 
@@ -130,38 +156,15 @@ pub fn find_interesctions(segments: &[Segment]) -> Vec<IntersectionPoint> {
         for new_event in new_events {
             event_queue.push(new_event);
         }
-
-        last_event = Some(event);
     }
 
     intersections
-}
-
-fn calc_intersection_point(segment_0: Segment, segment_1: Segment) -> Option<Point> {
-    let cross = |p_0: Point, p_1: Point| p_0.x * p_1.y - p_0.y * p_1.x;
-
-    let p = segment_0[0];
-    let q = segment_1[0];
-    let r = segment_0[1];
-    let s = segment_1[1];
-
-    let denominator = cross(s - q, r - p);
-
-    let u = cross(p - q, s - q) / denominator;
-    let t = cross(p - q, r - p) / denominator;
-
-    if (u >= 0.0 && u <= 1.0) && (t >= 0.0 && t <= 1.0) {
-        Some(p + u * (r - p))
-    } else {
-        None
-    }
 }
 
 fn update_status(
     status: &mut SkipList,
     event: EventPoint,
     segments: &[Segment],
-    last_event: Option<EventPoint>,
     last_intersection: Option<&mut IntersectionPoint>,
 ) -> (Vec<EventPoint>, Option<IntersectionPoint>) {
     match event.event_type {
@@ -170,8 +173,78 @@ fn update_status(
             update_status_with_intersection_point(event, status, segments)
         }
         EventPointType::EndPoint => {
-            update_status_with_end_point(event, status, segments, last_event, last_intersection)
+            update_status_with_end_point(event, status, segments, last_intersection)
         }
+    }
+}
+
+fn sort_joint_segments(
+    segment_indices: &[usize],
+    segments: &[Segment],
+    check_above: bool,
+) -> (Vec<usize>, f32) {
+    let get_closest_height = |indices: &[usize]| {
+        let first_segment = segments[indices[0]];
+        indices
+            .iter()
+            .map(|segment_index| {
+                let [p_0, p_1] = segments[*segment_index];
+                if check_above {
+                    p_0.y.max(p_1.y)
+                } else {
+                    p_0.y.min(p_1.y)
+                }
+            })
+            .fold(
+                if check_above {
+                    first_segment[0].y.max(first_segment[1].y)
+                } else {
+                    first_segment[0].y.min(first_segment[1].y)
+                },
+                |acc, e| if check_above { acc.min(e) } else { acc.max(e) },
+            )
+    };
+
+    if let Some(horizontal_segment_index) = segment_indices
+        .iter()
+        .find(|&&segment_index| segments[segment_index][0].y == segments[segment_index][1].y)
+    {
+        let mut filtered_indices: Vec<usize> = segment_indices
+            .iter()
+            .filter(|&index| index != horizontal_segment_index)
+            .copied()
+            .collect();
+        if filtered_indices.is_empty() {
+            (
+                vec![*horizontal_segment_index],
+                segments[*horizontal_segment_index][0].y,
+            )
+        } else {
+            let new_lowest_segment_start = get_closest_height(&filtered_indices);
+
+            filtered_indices.sort_by(|a, b| {
+                let a_x = get_x_val_of_segment_at_height(segments[*a], new_lowest_segment_start);
+                let b_x = get_x_val_of_segment_at_height(segments[*b], new_lowest_segment_start);
+                a_x.total_cmp(&b_x)
+            });
+
+            (
+                std::iter::once(*horizontal_segment_index)
+                    .chain(filtered_indices)
+                    .collect(),
+                new_lowest_segment_start,
+            )
+        }
+    } else {
+        let mut sorted_indices = segment_indices.to_vec();
+        let lowest_segment_start = get_closest_height(&segment_indices);
+        sorted_indices.sort_by(|a, b| {
+            get_x_val_of_segment_at_height(segments[*a], lowest_segment_start).total_cmp(
+                &get_x_val_of_segment_at_height(segments[*b], lowest_segment_start),
+            )
+        });
+
+        (sorted_indices, lowest_segment_start)
     }
 }
 
@@ -184,87 +257,58 @@ fn update_status_with_start_point(
 
     let event_segment_indices_vec: Vec<usize> = event.segment_indices.iter().copied().collect();
 
-    let earliest_segment_end = segments.iter().map(|[p_0, p_1]| p_0.y.min(p_1.y)).fold(
-        segments[event_segment_indices_vec[0]][0]
-            .y
-            .min(segments[event_segment_indices_vec[0]][1].y),
-        |acc, y| acc.min(y),
-    );
+    let (sorted_event_segment_indices, _) =
+        sort_joint_segments(&event_segment_indices_vec, segments, false);
 
-    let mut sorted_event_segment_indices = event_segment_indices_vec.clone();
-    sorted_event_segment_indices.sort_by(|a, b| {
-        get_x_val_of_segment_at_height(&segments[*a], earliest_segment_end).total_cmp(
-            &get_x_val_of_segment_at_height(&segments[*b], earliest_segment_end),
-        )
-    });
+    let insert_results: Vec<(Option<usize>, Option<usize>)> = sorted_event_segment_indices
+        .iter()
+        .map(|&segment_index| status.insert(segment_index, segments, event.position().y))
+        .collect();
 
-    let (left_neighbor, right_neighbor) =
-        if let Some(segment_index) = sorted_event_segment_indices.get(0) {
-            status.insert(*segment_index, segments, event.position().y)
-        } else {
-            (None, None)
-        };
+    let potential_left_neighbor = insert_results[0].0;
+    let potential_right_neighbor = insert_results.last().unwrap().1;
 
-    if sorted_event_segment_indices.len() > 1 {
-        for segment_index in &sorted_event_segment_indices[1..] {
-            let _ = status.insert(*segment_index, segments, event.position().y);
-        }
-    }
-
-    let mut start_point_intersecting_segments = if event.segment_indices.len() == 1 {
-        HashSet::new()
+    let mut start_intersection_segments = if sorted_event_segment_indices.len() > 1 {
+        HashSet::from_iter(sorted_event_segment_indices.clone())
     } else {
-        event.segment_indices.clone()
+        HashSet::new()
     };
 
-    let mut lower_intersection_points = Vec::new();
+    let mut later_intersection_events = Vec::new();
 
-    for segment_index in &event.segment_indices {
-        if let Some(left_neighbor) = left_neighbor {
-            if let Some(intersection_point) =
-                calc_intersection_point(segments[left_neighbor], segments[*segment_index])
-                && intersection_point.y <= event.position.y
-                && !points_are_close(intersection_point, segments[left_neighbor][0])
-                && !points_are_close(intersection_point, segments[left_neighbor][1])
-            {
-                if intersection_point == event.position() {
-                    start_point_intersecting_segments.extend(vec![*segment_index, left_neighbor]);
-                } else {
-                    lower_intersection_points.push((
-                        intersection_point,
-                        HashSet::from_iter(vec![*segment_index, left_neighbor]),
-                    ));
-                }
-            }
+    let mut get_neighbor_intersections = |segment: usize, neighbor: usize| {
+        let unbounded_intersection =
+            calc_intersection_point_unbounded(segments[neighbor], segments[segment]);
+        if points_are_close(unbounded_intersection, segments[neighbor][0])
+            || points_are_close(unbounded_intersection, segments[neighbor][1])
+        {
+            return;
         }
+        if points_are_close(unbounded_intersection, event.position()) {
+            start_intersection_segments.extend(vec![neighbor, segment]);
+            return;
+        }
+        let endpoint = segment_end(segments[segment]);
+        if points_are_close(unbounded_intersection, endpoint) {
+            return;
+        }
+        if let Some(intersection) = calc_intersection_point(segments[neighbor], segments[segment]) {
+            later_intersection_events.push(EventPoint {
+                position: intersection,
+                segment_indices: HashSet::from_iter(vec![neighbor, segment]),
+                event_type: EventPointType::Intersection,
+            });
+        }
+    };
 
-        if let Some(right_neighbor) = right_neighbor {
-            if let Some(intersection_point) =
-                calc_intersection_point(segments[right_neighbor], segments[*segment_index])
-                && intersection_point.y <= event.position.y
-                && !points_are_close(intersection_point, segments[right_neighbor][0])
-                && !points_are_close(intersection_point, segments[right_neighbor][1])
-            {
-                if intersection_point == event.position() {
-                    start_point_intersecting_segments.extend(vec![*segment_index, right_neighbor]);
-                } else {
-                    lower_intersection_points.push((
-                        intersection_point,
-                        HashSet::from_iter(vec![*segment_index, right_neighbor]),
-                    ));
-                }
-            }
+    for &segment in &sorted_event_segment_indices {
+        if let Some(left_neighbor) = potential_left_neighbor {
+            get_neighbor_intersections(segment, left_neighbor);
+        }
+        if let Some(right_neighbor) = potential_right_neighbor {
+            get_neighbor_intersections(segment, right_neighbor);
         }
     }
-
-    let event_points: Vec<EventPoint> = lower_intersection_points
-        .into_iter()
-        .map(|(position, segment_indices)| EventPoint {
-            position,
-            segment_indices,
-            event_type: EventPointType::Intersection,
-        })
-        .collect();
 
     assert_eq!(
         status.len(),
@@ -272,14 +316,11 @@ fn update_status_with_start_point(
     );
 
     (
-        event_points,
-        if !start_point_intersecting_segments.is_empty() {
+        later_intersection_events,
+        if !start_intersection_segments.is_empty() {
             Some(IntersectionPoint {
-                position: event.position,
-                intersecting_segment_indices: start_point_intersecting_segments
-                    .iter()
-                    .copied()
-                    .collect(),
+                position: event.position(),
+                intersecting_segment_indices: start_intersection_segments.into_iter().collect(),
             })
         } else {
             None
@@ -295,39 +336,8 @@ fn update_status_with_intersection_point(
     let original_status_len = status.len();
 
     let event_segment_indices_vec: Vec<usize> = event.segment_indices().iter().copied().collect();
-    let lowest_segment_start = calc_lowest_segment_start(&event_segment_indices_vec, segments);
-
-    let mut sorted_segment_indices = if let Some(horizontal_segment_index) =
-        event_segment_indices_vec
-            .iter()
-            .find(|&&segment_index| segments[segment_index][0].y == segments[segment_index][1].y)
-    {
-        let mut filtered_indices: Vec<usize> = event_segment_indices_vec
-            .iter()
-            .filter(|&index| index != horizontal_segment_index)
-            .copied()
-            .collect();
-        let new_lowest_segment_start = calc_lowest_segment_start(&filtered_indices, segments);
-
-        filtered_indices.sort_by(|a, b| {
-            get_x_val_of_segment_at_height(&segments[*a], new_lowest_segment_start).total_cmp(
-                &get_x_val_of_segment_at_height(&segments[*b], new_lowest_segment_start),
-            )
-        });
-
-        std::iter::once(*horizontal_segment_index)
-            .chain(filtered_indices)
-            .collect()
-    } else {
-        let mut sorted_indices = event_segment_indices_vec.clone();
-        sorted_indices.sort_by(|a, b| {
-            get_x_val_of_segment_at_height(&segments[*a], lowest_segment_start).total_cmp(
-                &get_x_val_of_segment_at_height(&segments[*b], lowest_segment_start),
-            )
-        });
-
-        sorted_indices
-    };
+    let (mut sorted_segment_indices, lowest_segment_start) =
+        sort_joint_segments(&event_segment_indices_vec, segments, true);
 
     let (potential_left_neighbor, potential_right_neighbor) = status.reverse(
         sorted_segment_indices[0],
@@ -381,41 +391,13 @@ fn update_status_with_end_point(
     event: EventPoint,
     status: &mut SkipList,
     segments: &[Segment],
-    potential_last_event: Option<EventPoint>,
     potential_last_intersection: Option<&mut IntersectionPoint>,
 ) -> (Vec<EventPoint>, Option<IntersectionPoint>) {
     let original_status_len = status.len();
+
     let event_segment_indices_vec: Vec<usize> = event.segment_indices().iter().copied().collect();
-    let lowest_start_height = calc_lowest_segment_start(&event_segment_indices_vec, segments);
-    let sorted_segment_indices = if let Some(horizontal_segment_index) = event_segment_indices_vec
-        .iter()
-        .find(|&&segment_index| segments[segment_index][0].y == segments[segment_index][1].y)
-    {
-        let mut filtered_indices: Vec<usize> = event_segment_indices_vec
-            .iter()
-            .filter(|index| *index != horizontal_segment_index)
-            .copied()
-            .collect();
-        let new_lowest_start_height = calc_lowest_segment_start(&filtered_indices, segments);
-        filtered_indices.sort_by(|a, b| {
-            get_x_val_of_segment_at_height(&segments[*a], new_lowest_start_height).total_cmp(
-                &get_x_val_of_segment_at_height(&segments[*b], new_lowest_start_height),
-            )
-        });
-
-        std::iter::once(*horizontal_segment_index)
-            .chain(filtered_indices)
-            .collect()
-    } else {
-        let mut sorted_indices = event_segment_indices_vec.clone();
-        sorted_indices.sort_by(|a, b| {
-            get_x_val_of_segment_at_height(&segments[*a], lowest_start_height).total_cmp(
-                &get_x_val_of_segment_at_height(&segments[*b], lowest_start_height),
-            )
-        });
-
-        sorted_indices
-    };
+    let (sorted_segment_indices, _) =
+        sort_joint_segments(&event_segment_indices_vec, segments, true);
 
     let deletion_results: Vec<(Option<usize>, Option<usize>)> = sorted_segment_indices
         .iter()
@@ -427,6 +409,8 @@ fn update_status_with_end_point(
     let potential_lower_intersection_event = if let Some(left) = potential_left_neighbor
         && let Some(right) = potential_right_neighbor
         && let Some(position) = calc_intersection_point(segments[left], segments[right])
+        && !points_are_close(position, segment_end(segments[left]))
+        && !points_are_close(position, segment_end(segments[right]))
     {
         vec![EventPoint {
             position,
@@ -437,96 +421,49 @@ fn update_status_with_end_point(
         Vec::new()
     };
 
-    let joint_segment_intersecting_segments = if let Some(last_event) = potential_last_event.clone()
-        && last_event.position() == event.position()
-    {
-        last_event.segment_indices().iter().copied().collect()
+    let mut end_intersection_segments = if sorted_segment_indices.len() > 1 {
+        HashSet::from_iter(sorted_segment_indices.clone())
     } else {
-        Vec::new()
-    };
-
-    let end_point_intersection = if sorted_segment_indices.len() == 1 {
-        None
-    } else {
-        Some(IntersectionPoint {
-            position: event.position(),
-            intersecting_segment_indices: sorted_segment_indices.clone(),
-        })
-    };
-
-    let mut full_intersection = if let Some(last_intersection) = potential_last_intersection
-        && (last_intersection.position - event.position).norm_squared() < 0.001
-    {
-        last_intersection
-            .intersecting_segment_indices
-            .extend(sorted_segment_indices.clone());
-        None
-    } else if let Some(intersection) = end_point_intersection {
-        Some(IntersectionPoint {
-            position: event.position(),
-            intersecting_segment_indices: intersection
-                .intersecting_segment_indices
-                .into_iter()
-                .chain(joint_segment_intersecting_segments)
-                .collect(),
-        })
-    } else if !joint_segment_intersecting_segments.is_empty() {
-        Some(IntersectionPoint {
-            position: event.position(),
-            intersecting_segment_indices: sorted_segment_indices
-                .clone()
-                .into_iter()
-                .chain(joint_segment_intersecting_segments)
-                .collect(),
-        })
-    } else {
-        None
+        HashSet::new()
     };
 
     if let Some(left_neighbor) = potential_left_neighbor
-        && let Some(intersection_point) = calc_intersection_point(
-            segments[event_segment_indices_vec[0]],
-            segments[left_neighbor],
+        && points_are_close(
+            calc_intersection_point_unbounded(
+                segments[left_neighbor],
+                segments[sorted_segment_indices[0]],
+            ),
+            event.position(),
         )
-        && points_are_close(intersection_point, event.position())
-        && potential_last_event
-            .as_ref()
-            .map(|last_event| last_event.position())
-            != Some(event.position())
     {
-        if let Some(intersection) = full_intersection.as_mut() {
-            intersection
-                .intersecting_segment_indices
-                .push(left_neighbor);
-        } else {
-            full_intersection = Some(IntersectionPoint {
-                position: event.position(),
-                intersecting_segment_indices: std::iter::once(left_neighbor)
-                    .chain(sorted_segment_indices.clone())
-                    .collect(),
-            });
-        }
+        end_intersection_segments.insert(left_neighbor);
+        end_intersection_segments.extend(sorted_segment_indices.clone());
     }
 
     if let Some(right_neighbor) = potential_right_neighbor
-        && let Some(intersection_point) = calc_intersection_point(
-            segments[event_segment_indices_vec[0]],
-            segments[right_neighbor],
+        && points_are_close(
+            calc_intersection_point_unbounded(
+                segments[right_neighbor],
+                segments[sorted_segment_indices[0]],
+            ),
+            event.position(),
         )
-        && points_are_close(intersection_point, event.position())
-        && potential_last_event.map(|last_event| last_event.position()) != Some(event.position())
     {
-        if let Some(intersection) = full_intersection.as_mut() {
-            intersection
+        end_intersection_segments.insert(right_neighbor);
+        end_intersection_segments.extend(sorted_segment_indices);
+    }
+
+    if let Some(last_intersection) = potential_last_intersection
+        && !end_intersection_segments.is_empty()
+        && points_are_close(last_intersection.position(), event.position())
+    {
+        for index in end_intersection_segments.drain() {
+            if !last_intersection
                 .intersecting_segment_indices
-                .push(right_neighbor);
-        } else {
-            full_intersection = Some(IntersectionPoint {
-                position: event.position(),
-                intersecting_segment_indices: std::iter::once(right_neighbor)
-                    .chain(sorted_segment_indices)
-                    .collect(),
-            });
+                .contains(&index)
+            {
+                last_intersection.intersecting_segment_indices.push(index);
+            }
         }
     }
 
@@ -535,39 +472,139 @@ fn update_status_with_end_point(
         original_status_len - event_segment_indices_vec.len()
     );
 
-    (potential_lower_intersection_event, full_intersection)
+    (
+        potential_lower_intersection_event,
+        if !end_intersection_segments.is_empty() {
+            Some(IntersectionPoint {
+                position: event.position(),
+                intersecting_segment_indices: end_intersection_segments.into_iter().collect(),
+            })
+        } else {
+            None
+        },
+    )
 }
 
-fn points_are_close(p_1: Point, p_2: Point) -> bool {
-    (p_1 - p_2).norm_squared() < 0.001
+fn calc_intersection_point(segment_0: Segment, segment_1: Segment) -> Option<Point> {
+    let cross = |p_0: Point, p_1: Point| p_0.x * p_1.y - p_0.y * p_1.x;
+
+    let p = segment_0[0];
+    let q = segment_1[0];
+    let r = segment_0[1];
+    let s = segment_1[1];
+
+    let denominator = cross(s - q, r - p);
+
+    let u = cross(p - q, s - q) / denominator;
+    let t = cross(p - q, r - p) / denominator;
+    if (u >= 0.0 && u <= 1.0) && (t >= 0.0 && t <= 1.0) {
+        Some(p + u * (r - p))
+    } else {
+        None
+    }
 }
 
-fn calc_lowest_segment_start(segment_indices: &[usize], segments: &[Segment]) -> f32 {
-    segment_indices
-        .iter()
-        .map(|index| {
-            let segment = segments[*index];
+fn calc_intersection_point_unbounded(segment_0: Segment, segment_1: Segment) -> Point {
+    let cross = |p_0: Point, p_1: Point| p_0.x * p_1.y - p_0.y * p_1.x;
 
-            segment[0].y.max(segment[1].y)
-        })
-        .fold(
-            segments[segment_indices[0]][0]
-                .y
-                .max(segments[segment_indices[0]][1].y),
-            |acc, height| acc.min(height),
-        )
+    let p = segment_0[0];
+    let q = segment_1[0];
+    let r = segment_0[1];
+    let s = segment_1[1];
+
+    let denominator = cross(s - q, r - p);
+
+    let u = cross(p - q, s - q) / denominator;
+    p + u * (r - p)
+}
+
+pub fn points_are_close(p_1: Point, p_2: Point) -> bool {
+    if p_1 == p_2 {
+        return true;
+    }
+    (p_1 - p_2).norm_squared() < 0.005
 }
 
 #[cfg(test)]
 mod test {
-    use crate::street_graph::points_are_close;
+    use crate::street_graph::{
+        calc_intersection_point_unbounded, points_are_close, sort_joint_segments,
+    };
     use std::{collections::HashSet, iter};
 
     use crate::{event_queue::EventQueue, street_graph::IntersectionPoint, tensor_field::Point};
 
     use super::{
-        EventPoint, EventPointType, Segment, SkipList, calc_intersection_point, update_status,
+        EventPoint, EventPointType, Segment, SkipList, calc_intersection_point, find_interesctions,
+        update_status,
     };
+
+    fn same_intersecting_segments(test: Vec<usize>, expected: Vec<usize>) -> bool {
+        test.len() == expected.len()
+            && HashSet::<usize>::from_iter(test)
+                .difference(&HashSet::from_iter(expected))
+                .count()
+                == 0
+    }
+
+    #[test]
+    fn sorting_simple_joint_start_segments() {
+        let segments = [
+            [Point::new(1.0, 1.0), Point::new(4.0, 0.0)],
+            [Point::new(1.0, 1.0), Point::new(2.0, -4.0)],
+            [Point::new(1.0, 1.0), Point::new(0.0, 0.0)],
+            [Point::new(1.0, 1.0), Point::new(5.0, 0.0)],
+        ];
+
+        assert_eq!(
+            sort_joint_segments(&[0, 1, 2, 3], &segments, false),
+            (vec![2, 1, 0, 3], 0.0)
+        );
+    }
+
+    #[test]
+    fn sorting_complex_joint_start_segments() {
+        let segments = [
+            [Point::new(1.0, 1.0), Point::new(4.0, 0.0)],
+            [Point::new(1.0, 1.0), Point::new(2.0, -4.0)],
+            [Point::new(1.0, 1.0), Point::new(0.0, 0.0)],
+            [Point::new(1.0, 1.0), Point::new(5.0, 0.0)],
+            [Point::new(1.0, 1.0), Point::new(4.0, 1.0)],
+        ];
+
+        assert_eq!(
+            sort_joint_segments(&[0, 1, 2, 3, 4], &segments, false),
+            (vec![4, 2, 1, 0, 3], 0.0)
+        );
+    }
+
+    #[test]
+    fn sorting_simple_joint_intersection_segments() {
+        let segments = [
+            [Point::new(2.0, 2.0), Point::new(0.0, 0.0)],
+            [Point::new(1.5, 0.5), Point::new(0.0, 2.0)],
+            [Point::new(1.0, 2.0), Point::new(1.0, 0.0)],
+        ];
+
+        assert_eq!(
+            sort_joint_segments(&[0, 1, 2], &segments, false),
+            (vec![0, 2, 1], 0.5)
+        );
+    }
+    #[test]
+    fn sorting_complex_joint_intersection_segments() {
+        let segments = [
+            [Point::new(2.0, 2.0), Point::new(0.0, 0.0)],
+            [Point::new(2.0, 0.0), Point::new(0.0, 2.0)],
+            [Point::new(0.0, 1.0), Point::new(2.0, 1.0)],
+            [Point::new(1.0, 2.0), Point::new(1.0, 0.0)],
+        ];
+
+        assert_eq!(
+            sort_joint_segments(&[0, 1, 2, 3], &segments, false),
+            (vec![2, 0, 3, 1], 0.0)
+        );
+    }
 
     #[test]
     fn segments_to_event_queue_correctly_prioritizes_single_segment() {
@@ -721,7 +758,7 @@ mod test {
 
         while let Some(event) = event_queue.pop() {
             let (result_events, result_intersection) =
-                update_status(&mut status, event, &segments, None, None);
+                update_status(&mut status, event, &segments, None);
 
             new_events.extend(result_events.into_iter());
             if let Some(intersection) = result_intersection {
@@ -761,7 +798,7 @@ mod test {
             };
 
             let (result_events, result_intersection) =
-                update_status(&mut status, event, &segments, None, None);
+                update_status(&mut status, event, &segments, None);
 
             new_events.extend(result_events.into_iter());
             if let Some(intersection) = result_intersection {
@@ -810,7 +847,7 @@ mod test {
 
         while let Some(event) = event_queue.pop() {
             let (result_events, result_intersection) =
-                update_status(&mut status, event, &segments, None, None);
+                update_status(&mut status, event, &segments, None);
 
             new_events.extend(result_events.into_iter());
             if let Some(intersection) = result_intersection {
@@ -866,7 +903,7 @@ mod test {
 
         while let Some(event) = event_queue.pop() {
             let (result_events, result_intersection) =
-                update_status(&mut status, event, &segments, None, None);
+                update_status(&mut status, event, &segments, None);
 
             new_events.extend(result_events.into_iter());
             if let Some(intersection) = result_intersection {
@@ -887,14 +924,12 @@ mod test {
             new_intersections[0].position,
             expected_intersections[0].position
         );
-        assert_eq!(
-            HashSet::<&usize>::from_iter(new_intersections[0].intersecting_segment_indices.iter()),
-            HashSet::from_iter(
-                expected_intersections[0]
-                    .intersecting_segment_indices
-                    .iter()
-            )
-        );
+        assert!(same_intersecting_segments(
+            new_intersections[0].intersecting_segment_indices.clone(),
+            expected_intersections[0]
+                .intersecting_segment_indices
+                .clone()
+        ));
 
         assert!(new_events.is_empty());
 
@@ -923,7 +958,7 @@ mod test {
 
         while let Some(event) = event_queue.pop() {
             let (result_events, result_intersection) =
-                update_status(&mut status, event, &segments, None, None);
+                update_status(&mut status, event, &segments, None);
 
             new_events.extend(result_events.into_iter());
             if let Some(intersection) = result_intersection {
@@ -933,17 +968,10 @@ mod test {
 
         assert_eq!(new_intersections.len(), 1);
         assert_eq!(new_intersections[0].position, Point::new(1.0, 1.0));
-        assert_eq!(new_intersections[0].intersecting_segment_indices.len(), 2);
-        assert!(
-            new_intersections[0]
-                .intersecting_segment_indices
-                .contains(&3)
-        );
-        assert!(
-            new_intersections[0]
-                .intersecting_segment_indices
-                .contains(&2)
-        );
+        assert!(same_intersecting_segments(
+            new_intersections[0].intersecting_segment_indices.clone(),
+            vec![2, 3]
+        ));
 
         assert_eq!(new_events.len(), 1);
         assert_eq!(new_events[0].event_type(), EventPointType::Intersection);
@@ -979,7 +1007,7 @@ mod test {
 
         while let Some(event) = event_queue.pop() {
             let (result_events, result_intersection) =
-                update_status(&mut status, event, &segments, None, None);
+                update_status(&mut status, event, &segments, None);
 
             new_events.extend(result_events.into_iter());
             if let Some(intersection) = result_intersection {
@@ -990,12 +1018,56 @@ mod test {
         assert!(new_events.is_empty());
         assert_eq!(new_intersections.len(), 1);
         assert_eq!(new_intersections[0].position, Point::new(2.0, 5.0));
+        assert!(same_intersecting_segments(
+            new_intersections[0].intersecting_segment_indices.clone(),
+            vec![0, 1]
+        ));
+    }
+
+    #[test]
+    fn start_points_correctly_identify_segment_start_on_other_segment_2() {
+        let segments = vec![
+            [
+                Point::new(133.69496, 359.18222),
+                Point::new(145.6927, 330.59787),
+            ],
+            [
+                Point::new(138.1485, 348.57175),
+                Point::new(118.75913, 338.8408),
+            ],
+        ];
+
+        let mut event_queue = load_segment_start_event_to_event_queue(&segments);
+        let mut status = SkipList::new();
+
+        let mut new_events: Vec<EventPoint> = Vec::new();
+        let mut new_intersections = Vec::new();
+
+        while let Some(event) = event_queue.pop() {
+            let (result_events, result_intersection) = update_status(
+                &mut status,
+                event.clone(),
+                &segments,
+                new_intersections.last_mut(),
+            );
+
+            new_events.extend(result_events.into_iter());
+            if let Some(intersection) = result_intersection {
+                new_intersections.push(intersection);
+            }
+        }
+        assert_eq!(status.to_vec(), vec![1, 0]);
+
+        assert!(new_events.is_empty());
+        assert_eq!(new_intersections.len(), 1);
         assert_eq!(
-            HashSet::<usize>::from_iter(new_intersections[0].intersecting_segment_indices.clone())
-                .difference(&HashSet::from_iter(vec![0, 1]))
-                .count(),
-            0
+            new_intersections[0].position,
+            Point::new(138.1485, 348.57175)
         );
+        assert!(same_intersecting_segments(
+            new_intersections[0].intersecting_segment_indices.clone(),
+            vec![0, 1]
+        ));
     }
 
     #[test]
@@ -1013,7 +1085,7 @@ mod test {
 
         while let Some(event) = event_queue.pop() {
             let (result_events, result_intersection) =
-                update_status(&mut status, event, &segments, None, None);
+                update_status(&mut status, event, &segments, None);
 
             for event in result_events {
                 new_events.push(event);
@@ -1033,7 +1105,6 @@ mod test {
             new_events.pop().unwrap().clone(),
             &segments,
             None,
-            None,
         );
         assert!(result_events.is_empty());
 
@@ -1042,14 +1113,10 @@ mod test {
             result_intersection.as_ref().unwrap().position,
             Point::new(2.0, 5.0)
         );
-        let intersecting_indices_set: HashSet<usize> =
-            HashSet::from_iter(result_intersection.unwrap().intersecting_segment_indices);
-        assert_eq!(
-            intersecting_indices_set
-                .difference(&HashSet::from_iter(vec![0, 1]))
-                .count(),
-            0
-        );
+        assert!(same_intersecting_segments(
+            result_intersection.unwrap().intersecting_segment_indices,
+            vec![0, 1]
+        ));
 
         assert_eq!(status.to_vec(), vec![1, 0]);
     }
@@ -1071,7 +1138,7 @@ mod test {
 
         while let Some(event) = event_queue.pop() {
             let (result_events, result_intersection) =
-                update_status(&mut status, event, &segments, None, None);
+                update_status(&mut status, event, &segments, None);
 
             for event in result_events {
                 new_events.push(event);
@@ -1089,19 +1156,14 @@ mod test {
             new_events.pop().unwrap().clone(),
             &segments,
             None,
-            None,
         );
         assert!(result_events.is_empty());
 
         assert!(result_intersection.is_some(),);
-        let intersecting_indices_set: HashSet<usize> =
-            HashSet::from_iter(result_intersection.unwrap().intersecting_segment_indices);
-        assert_eq!(
-            intersecting_indices_set
-                .difference(&HashSet::from_iter(vec![0, 1, 2, 3]))
-                .count(),
-            0
-        );
+        assert!(same_intersecting_segments(
+            result_intersection.unwrap().intersecting_segment_indices,
+            vec![0, 1, 2, 3]
+        ));
 
         assert_eq!(status.to_vec(), vec![2, 1, 3, 0]);
     }
@@ -1115,6 +1177,13 @@ mod test {
             [Point::new(0.0, 0.0), Point::new(2.0, 2.0)],
         ];
 
+        /*
+            polygon((1.3, 2.8), (4.5, 0.26))
+            polygon((-0.28, 0.37), (0.38, 1.95))
+            polygon((0.49, 2.43), (1.94, -0.14))
+            polygon((0.0, 0.0), (2.0, 2.0))
+        */
+
         let mut event_queue = load_segment_start_event_to_event_queue(&segments);
         let mut status = SkipList::new();
 
@@ -1123,7 +1192,7 @@ mod test {
 
         while let Some(event) = event_queue.pop() {
             let (result_events, result_intersection) =
-                update_status(&mut status, event, &segments, None, None);
+                update_status(&mut status, event, &segments, None);
 
             for event in result_events {
                 new_events.push(event);
@@ -1143,7 +1212,6 @@ mod test {
             new_events.pop().unwrap().clone(),
             &segments,
             None,
-            None,
         );
         assert!(result_events.is_empty());
 
@@ -1152,14 +1220,10 @@ mod test {
             result_intersection.as_ref().unwrap().position,
             Point::new(1.18975124, 1.18975124)
         ));
-        let intersecting_indices_set: HashSet<usize> =
-            HashSet::from_iter(result_intersection.unwrap().intersecting_segment_indices);
-        assert_eq!(
-            intersecting_indices_set
-                .difference(&HashSet::from_iter(vec![0, 1, 2, 3]))
-                .count(),
-            0
-        );
+        assert!(same_intersecting_segments(
+            result_intersection.unwrap().intersecting_segment_indices,
+            vec![2, 3]
+        ));
 
         assert_eq!(status.to_vec(), vec![1, 3, 2, 0]);
     }
@@ -1182,7 +1246,7 @@ mod test {
 
         while let Some(event) = event_queue.pop() {
             let (result_events, result_intersection) =
-                update_status(&mut status, event, &segments, None, None);
+                update_status(&mut status, event, &segments, None);
 
             for event in result_events {
                 new_events.push(event);
@@ -1202,7 +1266,6 @@ mod test {
             new_events.pop().unwrap().clone(),
             &segments,
             None,
-            None,
         );
         assert!(result_events.is_empty());
 
@@ -1211,14 +1274,10 @@ mod test {
             result_intersection.as_ref().unwrap().position,
             Point::new(1.18975124, 1.18975124)
         ));
-        let intersecting_indices_set: HashSet<usize> =
-            HashSet::from_iter(result_intersection.unwrap().intersecting_segment_indices);
-        assert_eq!(
-            intersecting_indices_set
-                .difference(&HashSet::from_iter(vec![0, 1, 2, 3, 4]))
-                .count(),
-            0
-        );
+        assert!(same_intersecting_segments(
+            result_intersection.unwrap().intersecting_segment_indices,
+            vec![0, 2, 3, 4]
+        ));
 
         assert_eq!(status.to_vec(), vec![1, 3, 4, 2, 0]);
     }
@@ -1240,7 +1299,7 @@ mod test {
 
         while let Some(event) = event_queue.pop() {
             let (result_events, result_intersection) =
-                update_status(&mut status, event, &segments, None, None);
+                update_status(&mut status, event, &segments, None);
 
             for event in result_events {
                 new_events.push(event);
@@ -1259,7 +1318,6 @@ mod test {
             &mut status,
             new_events.pop().unwrap().clone(),
             &segments,
-            None,
             None,
         );
         assert_eq!(result_events.len(), 1);
@@ -1280,14 +1338,10 @@ mod test {
             result_intersection.as_ref().unwrap().position,
             Point::new(0.53836735, 1.43183673)
         ));
-        let intersecting_indices_set: HashSet<usize> =
-            HashSet::from_iter(result_intersection.unwrap().intersecting_segment_indices);
-        assert_eq!(
-            intersecting_indices_set
-                .difference(&HashSet::from_iter(vec![1, 2]))
-                .count(),
-            0
-        );
+        assert!(same_intersecting_segments(
+            result_intersection.unwrap().intersecting_segment_indices,
+            vec![1, 2]
+        ));
 
         assert_eq!(status.to_vec(), vec![0, 1, 2, 3]);
     }
@@ -1309,7 +1363,7 @@ mod test {
 
         while let Some(event) = event_queue.pop() {
             let (result_events, result_intersection) =
-                update_status(&mut status, event, &segments, None, None);
+                update_status(&mut status, event, &segments, None);
 
             for event in result_events {
                 new_events.push(event);
@@ -1328,7 +1382,6 @@ mod test {
             &mut status,
             new_events.pop().unwrap().clone(),
             &segments,
-            None,
             None,
         );
         assert_eq!(result_events.len(), 1);
@@ -1349,14 +1402,10 @@ mod test {
             result_intersection.as_ref().unwrap().position,
             Point::new(0.53836735, 1.43183673)
         ));
-        let intersecting_indices_set: HashSet<usize> =
-            HashSet::from_iter(result_intersection.unwrap().intersecting_segment_indices);
-        assert_eq!(
-            intersecting_indices_set
-                .difference(&HashSet::from_iter(vec![1, 2, 3]))
-                .count(),
-            0
-        );
+        assert!(same_intersecting_segments(
+            result_intersection.unwrap().intersecting_segment_indices,
+            vec![1, 2, 3]
+        ));
 
         assert_eq!(status.to_vec(), vec![0, 1, 3, 2]);
     }
@@ -1378,7 +1427,7 @@ mod test {
 
         while let Some(event) = event_queue.pop() {
             let (result_events, result_intersection) =
-                update_status(&mut status, event, &segments, None, None);
+                update_status(&mut status, event, &segments, None);
 
             for event in result_events {
                 new_events.push(event);
@@ -1397,7 +1446,6 @@ mod test {
             &mut status,
             new_events.pop().unwrap().clone(),
             &segments,
-            None,
             None,
         );
         assert_eq!(result_events.len(), 2);
@@ -1429,14 +1477,10 @@ mod test {
             result_intersection.as_ref().unwrap().position,
             Point::new(0.55436893, 0.96699029)
         ));
-        let intersecting_indices_set: HashSet<usize> =
-            HashSet::from_iter(result_intersection.unwrap().intersecting_segment_indices);
-        assert_eq!(
-            intersecting_indices_set
-                .difference(&HashSet::from_iter(vec![1, 3]))
-                .count(),
-            0
-        );
+        assert!(same_intersecting_segments(
+            result_intersection.unwrap().intersecting_segment_indices,
+            vec![1, 3]
+        ));
 
         assert_eq!(status.to_vec(), vec![0, 1, 3, 2]);
     }
@@ -1459,7 +1503,7 @@ mod test {
 
         while let Some(event) = event_queue.pop() {
             let (result_events, result_intersection) =
-                update_status(&mut status, event, &segments, None, None);
+                update_status(&mut status, event, &segments, None);
 
             for event in result_events {
                 new_events.push(event);
@@ -1478,7 +1522,6 @@ mod test {
             &mut status,
             new_events.pop().unwrap().clone(),
             &segments,
-            None,
             None,
         );
         assert_eq!(result_events.len(), 2);
@@ -1510,14 +1553,10 @@ mod test {
             result_intersection.as_ref().unwrap().position,
             Point::new(0.53836735, 1.43183673)
         ));
-        let intersecting_indices_set: HashSet<usize> =
-            HashSet::from_iter(result_intersection.unwrap().intersecting_segment_indices);
-        assert_eq!(
-            intersecting_indices_set
-                .difference(&HashSet::from_iter(vec![1, 2, 3]))
-                .count(),
-            0
-        );
+        assert!(same_intersecting_segments(
+            result_intersection.unwrap().intersecting_segment_indices,
+            vec![1, 2, 3]
+        ));
 
         assert_eq!(status.to_vec(), vec![0, 1, 3, 2, 4]);
     }
@@ -1529,10 +1568,8 @@ mod test {
         let mut event_queue = EventQueue::from_segments(&segments);
         let mut status = SkipList::new();
 
-        let mut last_event = None;
         while let Some(event) = event_queue.pop() {
-            let _ = update_status(&mut status, event.clone(), &segments, last_event, None);
-            last_event = Some(event);
+            let _ = update_status(&mut status, event.clone(), &segments, None);
         }
 
         assert_eq!(status.len(), 0);
@@ -1550,26 +1587,25 @@ mod test {
 
         let mut all_new_intersections = Vec::new();
 
-        let mut last_event = None;
         while let Some(event) = event_queue.pop() {
             let (_, potential_new_intersection) = update_status(
                 &mut status,
                 event.clone(),
                 &segments,
-                last_event,
                 all_new_intersections.last_mut(),
             );
             all_new_intersections.extend(potential_new_intersection);
-            last_event = Some(event);
         }
 
         assert_eq!(status.len(), 0);
         assert_eq!(all_new_intersections.len(), 1);
         assert_eq!(all_new_intersections[0].position, Point::new(0.0, 4.0));
-        assert_eq!(
-            all_new_intersections[0].intersecting_segment_indices,
+        assert!(same_intersecting_segments(
+            all_new_intersections[0]
+                .intersecting_segment_indices
+                .clone(),
             vec![1, 0]
-        );
+        ));
     }
 
     #[test]
@@ -1585,15 +1621,12 @@ mod test {
 
         let mut new_event_points = Vec::new();
 
-        let mut last_event = None;
         while let Some(event) = event_queue.pop() {
-            let (new_events, _) =
-                update_status(&mut status, event.clone(), &segments, last_event, None);
+            let (new_events, _) = update_status(&mut status, event.clone(), &segments, None);
             new_event_points.extend(new_events.clone());
             for event in new_events {
                 event_queue.push(event);
             }
-            last_event = Some(event);
         }
 
         assert_eq!(status.len(), 0);
@@ -1631,13 +1664,11 @@ mod test {
         let mut all_new_event_points = Vec::new();
         let mut all_new_intersections = Vec::new();
 
-        let mut last_event = None;
         while let Some(event) = event_queue.pop() {
             let (new_events, new_intersections) = update_status(
                 &mut status,
                 event.clone(),
                 &segments,
-                last_event,
                 all_new_intersections.last_mut(),
             );
             all_new_event_points.extend(new_events.clone());
@@ -1645,18 +1676,18 @@ mod test {
             for new_event in new_events {
                 event_queue.push(new_event);
             }
-
-            last_event = Some(event);
         }
 
         assert_eq!(status.len(), 0);
 
         assert_eq!(all_new_intersections.len(), 2);
         assert_eq!(all_new_intersections[0].position, Point::new(2.0, 4.0));
-        assert_eq!(
-            all_new_intersections[0].intersecting_segment_indices,
+        assert!(same_intersecting_segments(
+            all_new_intersections[0]
+                .intersecting_segment_indices
+                .clone(),
             vec![4, 3, 0]
-        );
+        ));
 
         assert_eq!(all_new_event_points.len(), 1);
         assert!(points_are_close(
@@ -1689,13 +1720,11 @@ mod test {
         let mut all_new_event_points = Vec::new();
         let mut all_new_intersections = Vec::new();
 
-        let mut last_event = None;
         while let Some(event) = event_queue.pop() {
             let (new_events, new_intersections) = update_status(
                 &mut status,
                 event.clone(),
                 &segments,
-                last_event,
                 all_new_intersections.last_mut(),
             );
             all_new_event_points.extend(new_events.clone());
@@ -1703,17 +1732,18 @@ mod test {
             for new_event in new_events {
                 event_queue.push(new_event);
             }
-            last_event = Some(event);
         }
 
         assert!(all_new_event_points.is_empty());
         assert_eq!(all_new_intersections.len(), 1);
 
         assert_eq!(all_new_intersections[0].position, Point::new(2.0, 2.0));
-        assert_eq!(
-            all_new_intersections[0].intersecting_segment_indices,
+        assert!(same_intersecting_segments(
+            all_new_intersections[0]
+                .intersecting_segment_indices
+                .clone(),
             vec![0, 1]
-        );
+        ));
     }
 
     #[test]
@@ -1730,13 +1760,11 @@ mod test {
         let mut all_new_event_points = Vec::new();
         let mut all_new_intersections = Vec::new();
 
-        let mut last_event = None;
         while let Some(event) = event_queue.pop() {
             let (new_events, new_intersections) = update_status(
                 &mut status,
                 event.clone(),
                 &segments,
-                last_event,
                 all_new_intersections.last_mut(),
             );
             all_new_event_points.extend(new_events.clone());
@@ -1744,17 +1772,18 @@ mod test {
             for new_event in new_events {
                 event_queue.push(new_event);
             }
-            last_event = Some(event);
         }
 
         assert!(all_new_event_points.is_empty());
         assert_eq!(all_new_intersections.len(), 1);
 
         assert_eq!(all_new_intersections[0].position, Point::new(2.0, 2.0));
-        assert_eq!(
-            all_new_intersections[0].intersecting_segment_indices,
+        assert!(same_intersecting_segments(
+            all_new_intersections[0]
+                .intersecting_segment_indices
+                .clone(),
             vec![1, 0, 2]
-        );
+        ));
     }
 
     #[test]
@@ -1771,13 +1800,11 @@ mod test {
         let mut all_new_event_points = Vec::new();
         let mut all_new_intersections = Vec::new();
 
-        let mut last_event = None;
         while let Some(event) = event_queue.pop() {
             let (new_events, new_intersections) = update_status(
                 &mut status,
                 event.clone(),
                 &segments,
-                last_event,
                 all_new_intersections.last_mut(),
             );
             all_new_event_points.extend(new_events.clone());
@@ -1785,23 +1812,18 @@ mod test {
             for new_event in new_events {
                 event_queue.push(new_event);
             }
-            last_event = Some(event);
         }
 
         assert!(all_new_event_points.is_empty());
         assert_eq!(all_new_intersections.len(), 1);
 
         assert_eq!(all_new_intersections[0].position, Point::new(2.0, 2.0));
-        assert_eq!(
-            HashSet::<usize>::from_iter(
-                all_new_intersections[0]
-                    .intersecting_segment_indices
-                    .clone()
-            )
-            .difference(&HashSet::from_iter(vec![0, 1, 2]))
-            .count(),
-            0
-        );
+        assert!(same_intersecting_segments(
+            all_new_intersections[0]
+                .intersecting_segment_indices
+                .clone(),
+            vec![0, 1, 2]
+        ));
     }
 
     #[test]
@@ -1819,13 +1841,11 @@ mod test {
         let mut all_new_event_points = Vec::new();
         let mut all_new_intersections = Vec::new();
 
-        let mut last_event = None;
         while let Some(event) = event_queue.pop() {
             let (new_events, new_intersections) = update_status(
                 &mut status,
                 event.clone(),
                 &segments,
-                last_event,
                 all_new_intersections.last_mut(),
             );
             all_new_event_points.extend(new_events.clone());
@@ -1833,23 +1853,18 @@ mod test {
             for new_event in new_events {
                 event_queue.push(new_event);
             }
-            last_event = Some(event);
         }
 
         assert!(all_new_event_points.is_empty());
         assert_eq!(all_new_intersections.len(), 1);
 
         assert_eq!(all_new_intersections[0].position, Point::new(2.0, 2.0));
-        assert_eq!(
-            HashSet::<usize>::from_iter(
-                all_new_intersections[0]
-                    .intersecting_segment_indices
-                    .clone()
-            )
-            .difference(&HashSet::from_iter(vec![0, 1, 2, 3]))
-            .count(),
-            0
-        );
+        assert!(same_intersecting_segments(
+            all_new_intersections[0]
+                .intersecting_segment_indices
+                .clone(),
+            vec![0, 1, 2, 3]
+        ));
     }
 
     #[test]
@@ -1871,13 +1886,11 @@ mod test {
         let mut all_new_event_points = Vec::new();
         let mut all_new_intersections = Vec::new();
 
-        let mut last_event = None;
         while let Some(event) = event_queue.pop() {
             let (new_events, new_intersections) = update_status(
                 &mut status,
                 event.clone(),
                 &segments,
-                last_event,
                 all_new_intersections.last_mut(),
             );
             all_new_event_points.extend(new_events.clone());
@@ -1885,7 +1898,6 @@ mod test {
             for new_event in new_events {
                 event_queue.push(new_event);
             }
-            last_event = Some(event);
         }
 
         assert!(all_new_event_points.is_empty());
@@ -1896,16 +1908,12 @@ mod test {
             Point::new(477.3223, 385.51642)
         ));
 
-        assert_eq!(
-            HashSet::<usize>::from_iter(
-                all_new_intersections[0]
-                    .intersecting_segment_indices
-                    .clone()
-            )
-            .difference(&HashSet::from_iter(vec![0, 1]))
-            .count(),
-            0
-        );
+        assert!(same_intersecting_segments(
+            all_new_intersections[0]
+                .intersecting_segment_indices
+                .clone(),
+            vec![0, 1]
+        ));
     }
 
     #[test]
@@ -1927,13 +1935,11 @@ mod test {
         let mut all_new_event_points = Vec::new();
         let mut all_new_intersections = Vec::new();
 
-        let mut last_event = None;
         while let Some(event) = event_queue.pop() {
             let (new_events, new_intersections) = update_status(
                 &mut status,
                 event.clone(),
                 &segments,
-                last_event,
                 all_new_intersections.last_mut(),
             );
             all_new_event_points.extend(new_events.clone());
@@ -1941,7 +1947,6 @@ mod test {
             for new_event in new_events {
                 event_queue.push(new_event);
             }
-            last_event = Some(event);
         }
 
         assert!(all_new_event_points.is_empty());
@@ -1952,15 +1957,33 @@ mod test {
             Point::new(27.07552, 382.18222),
         ));
 
-        assert_eq!(
-            HashSet::<usize>::from_iter(
-                all_new_intersections[0]
-                    .intersecting_segment_indices
-                    .clone()
-            )
-            .difference(&HashSet::from_iter(vec![0, 1]))
-            .count(),
-            0
-        );
+        assert!(same_intersecting_segments(
+            all_new_intersections[0]
+                .intersecting_segment_indices
+                .clone(),
+            vec![0, 1]
+        ));
+    }
+
+    #[test]
+    fn temp() {
+        let segments = vec![
+            [
+                Point::new(432.74377, 443.7191),
+                Point::new(434.6598, 424.6146),
+            ],
+            [
+                Point::new(453.9633, 426.55057),
+                Point::new(427.1264, 423.7954),
+            ],
+        ];
+
+        let intersections = find_interesctions(&segments);
+
+        assert_eq!(intersections.len(), 1);
+        assert!(points_are_close(
+            intersections[0].position(),
+            calc_intersection_point_unbounded(segments[0], segments[1])
+        ));
     }
 }
