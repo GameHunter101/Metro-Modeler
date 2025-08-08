@@ -511,13 +511,13 @@ fn clamp_vec_to_grid(vec: Vector2<f32>) -> Vector2<f32> {
     )
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ControlPoint {
     pub position: Point,
     pub velocity: Vector2<f32>,
 }
 
-type HermiteCurve = Vec<ControlPoint>;
+pub type HermiteCurve = Vec<ControlPoint>;
 
 struct SmoothedCurve {
     curve: HermiteCurve,
@@ -786,10 +786,10 @@ fn raycast_to_curve(point: Point, other_curves: &[HermiteCurve]) -> f32 {
 /// Returns the squared distance to the nearest point to save on computation.
 /// Raycasts to a piecewise linear approximation of the hermite curves. This isn't completely
 /// accurate but the curve fit is good enough where the error is negligible.
-/// This function also returns the closest approximation point, and the velocity at that approximation
+/// This function also returns the closest approximation point and the velocity at that approximation
 fn raycast_to_curve_with_more_info(
     point: Point,
-    other_curves: &[HermiteCurve],
+    other_curves: &[&HermiteCurve],
 ) -> (f32, Point, Vector2<f32>) {
     other_curves
         .par_iter()
@@ -834,64 +834,155 @@ fn evaluate_hermite_curve(
         + p_0
 }
 
-pub fn merge_road_endings(
-    original_curves: &[HermiteCurve],
-    curves_to_project_onto: &[HermiteCurve],
-    connection_distance: f32,
-) -> Vec<HermiteCurve> {
-    original_curves
+fn merge_point_to_curves(
+    point: ControlPoint,
+    other_curves: &[&HermiteCurve],
+    connection_distance_squared: f32,
+) -> ControlPoint {
+    let potential_snap = snap_point_to_point(point, &other_curves, connection_distance_squared);
+
+    if let Some(snap) = potential_snap {
+        snap
+    } else {
+        let (closest_distance_squared, closest_point, _) =
+            raycast_to_curve_with_more_info(point.position, &other_curves);
+        if closest_distance_squared < connection_distance_squared {
+            ControlPoint {
+                position: closest_point,
+                ..point
+            }
+        } else {
+            point
+        }
+    }
+}
+
+pub fn merge_road_endings(curves: &[HermiteCurve], connection_distance: f32) -> Vec<HermiteCurve> {
+    let mut merged_curves = Vec::with_capacity(curves.len());
+    curves.iter().enumerate().for_each(|(i, curve)| {
+        let (_, right_split) = curves.split_at(i);
+        let other_curves: Vec<&HermiteCurve> = merged_curves
+            .iter()
+            .chain(right_split[1..].into_iter())
+            .collect();
+
+        let connection_distance_squared = connection_distance * connection_distance;
+
+        let merged_top = merge_point_to_curves(curve[0], &other_curves, connection_distance_squared);
+        let merged_bottom = merge_point_to_curves(*curve.last().unwrap(), &other_curves, connection_distance_squared);
+
+        merged_curves.push(
+            std::iter::once(merged_top)
+                .chain(curve[1..curve.len() - 1].to_vec())
+                .chain(std::iter::once(merged_bottom))
+                .collect::<Vec<_>>(),
+        );
+    });
+
+    merged_curves
+}
+
+fn snap_point_to_point(
+    point: ControlPoint,
+    curves: &[&HermiteCurve],
+    snap_distance_squared: f32,
+) -> Option<ControlPoint> {
+    let possible_snaps: Vec<ControlPoint> = curves
         .par_iter()
-        .map(|curve| {
-            let mut new_curve = Vec::new();
-
-            let (
-                start_point_closest_distance_squared,
-                start_point_closest_point,
-                _start_point_closest_velocity,
-            ) = raycast_to_curve_with_more_info(curve[0].position, &curves_to_project_onto);
-
-            let start_point_closest_distance = start_point_closest_distance_squared.sqrt();
-
-            if start_point_closest_distance > 0.001
-                && start_point_closest_distance < connection_distance
-            {
-                new_curve.push(ControlPoint {
-                    position: start_point_closest_point,
-                    velocity: curve[0].velocity,
-                });
-                new_curve.extend(&curve[1..]);
-            } else {
-                new_curve = curve.clone();
-            }
-
-            let (
-                end_point_closest_distance_squared,
-                end_point_closest_point,
-                _end_point_closest_velocity,
-            ) = raycast_to_curve_with_more_info(
-                curve[curve.len() - 1].position,
-                &curves_to_project_onto,
-            );
-
-            let end_point_closest_distance = end_point_closest_distance_squared.sqrt();
-
-            if end_point_closest_distance > 0.001
-                && end_point_closest_distance < connection_distance
-            {
-                new_curve.remove(new_curve.len() - 1);
-                new_curve.push(ControlPoint {
-                    position: end_point_closest_point,
-                    velocity: curve[curve.len() - 1].velocity,
-                });
-            } else {
-                new_curve = curve.clone();
-            }
-
-            if new_curve.len() < 2 {
-                dbg!(new_curve.len());
-            }
-
-            new_curve
+        .flat_map(|curve| {
+            curve
+                .iter()
+                .find(|control_point| {
+                    (control_point.position - point.position).norm_squared() < snap_distance_squared
+                })
+                .copied()
         })
-        .collect()
+        .collect();
+
+    if !possible_snaps.is_empty() {
+        let closest_snap = possible_snaps
+            .iter()
+            .fold(
+                (
+                    possible_snaps[0],
+                    (possible_snaps[0].position - point.position).norm_squared(),
+                ),
+                |acc, e| {
+                    let new_dist_squared = (e.position - point.position).norm_squared();
+                    if new_dist_squared < acc.1 {
+                        (*e, new_dist_squared)
+                    } else {
+                        acc
+                    }
+                },
+            )
+            .0;
+        Some(ControlPoint {
+            position: closest_snap.position,
+            ..point
+        })
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::tensor_field::Point;
+
+    use super::{ControlPoint, merge_road_endings};
+
+    #[test]
+    fn basic_1() {
+        let curves = vec![
+            vec![
+                ControlPoint {
+                    position: Point::new(200.33408, 330.78735),
+                    velocity: Point::zeros(),
+                },
+                ControlPoint {
+                    position: Point::new(200.55362, 283.93994),
+                    velocity: Point::zeros(),
+                },
+                ControlPoint {
+                    position: Point::new(200.43358, 278.89685),
+                    velocity: Point::zeros(),
+                },
+            ],
+            vec![
+                ControlPoint {
+                    position: Point::new(213.51936, 320.7687),
+                    velocity: Point::zeros(),
+                },
+                ControlPoint {
+                    position: Point::new(206.88176, 302.08206),
+                    velocity: Point::zeros(),
+                },
+                ControlPoint {
+                    position: Point::new(200.67397, 284.30655),
+                    velocity: Point::zeros(),
+                },
+            ],
+        ];
+
+        let merged_curves = merge_road_endings(&curves, 5.0);
+
+        let expected_new_curve = vec![
+            ControlPoint {
+                position: Point::new(213.51936, 320.7687),
+                velocity: Point::zeros(),
+            },
+            ControlPoint {
+                position: Point::new(206.88176, 302.08206),
+                velocity: Point::zeros(),
+            },
+            ControlPoint {
+                position: Point::new(200.55362, 283.93994),
+                velocity: Point::zeros(),
+            },
+        ];
+
+        assert_eq!(merged_curves[0], curves[0]);
+        assert_eq!(merged_curves[1], expected_new_curve);
+    }
 }

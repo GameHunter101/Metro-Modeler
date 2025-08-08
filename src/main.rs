@@ -1,7 +1,7 @@
 use image::{EncodableLayout, ImageBuffer};
 use nalgebra::Vector2;
 use street_graph::find_interesctions;
-use street_plan::{SeedPoint, merge_road_endings, resample_curve, trace_street_plan};
+use street_plan::{HermiteCurve, SeedPoint, merge_road_endings, resample_curve, trace_street_plan};
 use tensor_field::{DesignElement, EvalEigenvectors, GRID_SIZE, Point, TensorField};
 use v4::{
     builtin_components::mesh_component::{MeshComponent, VertexDescriptor},
@@ -60,46 +60,35 @@ async fn main() {
             Vec::new(),
         );
 
-    let major_network_merge_distance = 10.0;
-    let major_network_major_curves = merge_road_endings(
-        &major_network_major_curves_unconnected,
-        &major_network_minor_curves_unconnected,
-        major_network_merge_distance,
-    );
-    let major_network_minor_curves = merge_road_endings(
-        &major_network_minor_curves_unconnected,
-        &major_network_major_curves,
-        major_network_merge_distance,
-    );
+    let major_network_major_curves_len = major_network_major_curves_unconnected.len();
 
-    let minor_network_seed_points: Vec<SeedPoint> = major_network_major_curves
+    let major_network_curves_unconnected: Vec<HermiteCurve> = major_network_major_curves_unconnected
+        .into_iter()
+        .chain(major_network_minor_curves_unconnected)
+        .collect();
+    let major_network_merge_distance = 5.0;
+    let major_network_curves = merge_road_endings(&major_network_curves_unconnected, major_network_merge_distance);
+
+    let minor_network_seed_points: Vec<SeedPoint> = major_network_curves
         .iter()
-        .map(|curve| {
+        .flat_map(|curve| {
             (0..curve.len() - 1)
                 .map(|i| SeedPoint {
                     seed: (curve[i].position + curve[i + 1].position) / 2.0,
                     priority: 0.0,
-                    follow_major_eigenvectors: false,
+                    follow_major_eigenvectors: i > major_network_major_curves_len,
                 })
                 .collect::<Vec<_>>()
         })
-        .chain(major_network_minor_curves.iter().map(|curve| {
-            (0..curve.len() - 1)
-                .map(|i| SeedPoint {
-                    seed: (curve[i].position + curve[i + 1].position) / 2.0,
-                    priority: 0.0,
-                    follow_major_eigenvectors: true,
-                })
-                .collect::<Vec<_>>()
-        }))
-        .flatten()
         .collect();
 
     let major_network: Result<Vec<Vec<Point>>, tokio::task::JoinError> = futures::future::join_all(
-        major_network_major_curves
-            .clone()
+        /* major_network_major_curves
+        .clone()
+        .into_iter()
+        .chain(major_network_minor_curves.clone()) */
+        major_network_curves.clone()
             .into_iter()
-            .chain(major_network_minor_curves.clone())
             .map(|curve| tokio::spawn(async { resample_curve(curve, 20) })),
     )
     .await
@@ -108,9 +97,10 @@ async fn main() {
 
     let major_network = major_network.unwrap();
 
-    let all_curves: Vec<_> = major_network_major_curves
+    let all_curves: Vec<_> = /* major_network_major_curves
         .iter()
-        .chain(&major_network_minor_curves)
+        .chain(&major_network_minor_curves) */
+    major_network_curves.iter()
         .map(|curve| {
             curve
                 .into_iter()
@@ -129,10 +119,13 @@ async fn main() {
                 .collect::<Vec<_>>()
         })
         .collect();
-    /* println!(
+    println!(
         "{:?}",
-        major_network_segments.iter().flat_map(|segment| [(segment[0].x, segment[0].y), (segment[1].x, segment[1].y)]).collect::<Vec<_>>()
-    ); */
+        major_network_segments
+            .iter()
+            .flat_map(|segment| [(segment[0].x, segment[0].y), (segment[1].x, segment[1].y)])
+            .collect::<Vec<_>>()
+    );
     println!("Starting to find intersections");
     let major_intersections = find_interesctions(&major_network_segments);
     println!("Done with intersections");
@@ -169,19 +162,18 @@ async fn main() {
             city_center,
             5.0,
             3,
-            major_network_major_curves,
-            major_network_minor_curves,
+            major_network_curves[..major_network_major_curves_len].to_vec(),
+            major_network_curves[major_network_major_curves_len..].to_vec(),
         );
 
+    let minor_network_curves_unconnected: Vec<HermiteCurve> = minor_network_major_curves_unconnected.into_iter().chain(minor_network_minor_curves_unconnected).collect();
     let minor_network_merge_distance = 7.0;
     let minor_network_major_curves = merge_road_endings(
-        &minor_network_major_curves_unconnected,
-        &minor_network_minor_curves_unconnected,
+        &minor_network_curves_unconnected,
         minor_network_merge_distance,
     );
     let minor_network_minor_curves = merge_road_endings(
-        &minor_network_minor_curves_unconnected,
-        &minor_network_major_curves,
+        &minor_network_curves_unconnected,
         minor_network_merge_distance,
     );
 
