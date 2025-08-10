@@ -1,11 +1,15 @@
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
+
+use nalgebra::Vector2;
+use ordered_float::OrderedFloat;
 
 use crate::event_queue::EventQueue;
 use crate::status::{SkipList, get_x_val_of_segment_at_height};
 use crate::tensor_field::Point;
 
-#[derive(Debug, PartialEq, PartialOrd)]
+#[derive(Debug, PartialOrd, Clone)]
 pub struct IntersectionPoint {
     pub position: Point,
     pub intersecting_segment_indices: Vec<usize>,
@@ -15,7 +19,30 @@ impl IntersectionPoint {
     pub fn position(&self) -> Point {
         self.position
     }
+
+    pub fn replace_intersecting_index(&mut self, target: usize, replacement: usize) {
+        for segment_idx in &mut self.intersecting_segment_indices {
+            if *segment_idx == target {
+                *segment_idx = replacement;
+                return;
+            }
+        }
+    }
 }
+
+impl Hash for IntersectionPoint {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        [OrderedFloat(self.position.x), OrderedFloat(self.position.y)].hash(state);
+    }
+}
+
+impl PartialEq for IntersectionPoint {
+    fn eq(&self, other: &Self) -> bool {
+        self.position == other.position
+    }
+}
+
+impl Eq for IntersectionPoint {}
 
 #[derive(Debug, Clone)]
 pub struct EventPoint {
@@ -228,12 +255,22 @@ fn sort_joint_segments(
                 a_x.total_cmp(&b_x)
             });
 
-            (
-                std::iter::once(*horizontal_segment_index)
-                    .chain(filtered_indices)
-                    .collect(),
-                new_lowest_segment_start,
-            )
+            if check_above {
+                (
+                    std::iter::once(*horizontal_segment_index)
+                        .chain(filtered_indices)
+                        .collect(),
+                    new_lowest_segment_start,
+                )
+            } else {
+                (
+                    filtered_indices
+                        .into_iter()
+                        .chain(std::iter::once(*horizontal_segment_index))
+                        .collect(),
+                    new_lowest_segment_start,
+                )
+            }
         }
     } else {
         let mut sorted_indices = segment_indices.to_vec();
@@ -525,6 +562,102 @@ pub fn points_are_close(p_1: Point, p_2: Point) -> bool {
     (p_1 - p_2).norm_squared() < 0.005
 }
 
+pub fn split_segments_at_intersections(
+    all_intersections: &mut [IntersectionPoint],
+    new_intersections: Vec<usize>,
+    segments: &mut [Segment],
+) -> Vec<Segment> {
+    let inverse_intersections: HashMap<IntersectionPoint, usize> = HashMap::from_iter(
+        all_intersections
+            .into_iter()
+            .enumerate()
+            .map(|(i, intersection)| (intersection.clone(), i)),
+    );
+
+    let mut new_segments = Vec::new();
+
+    for intersection_index in new_intersections {
+        let (pre, post_and_intersection) = all_intersections.split_at_mut(intersection_index);
+        let (intersection, post) = post_and_intersection.split_first_mut().unwrap();
+        let mut other_intersections: Vec<&mut IntersectionPoint> =
+            pre.into_iter().chain(post).collect();
+
+        for intersecting_segment_index in intersection.intersecting_segment_indices.clone() {
+            if intersecting_segment_index >= segments.len() {
+                continue;
+            }
+            let intersecting_segment = segments[intersecting_segment_index];
+            if intersecting_segment[0] != intersection.position()
+                && intersecting_segment[1] != intersection.position()
+            {
+                let new_segment_index = segments.len() + new_segments.len();
+                new_segments.push([intersection.position(), intersecting_segment[1]]);
+                intersection
+                    .intersecting_segment_indices
+                    .push(new_segment_index);
+                let intersecting_segment_endpoint_index = inverse_intersections
+                    [&IntersectionPoint {
+                        position: intersecting_segment[1],
+                        intersecting_segment_indices: Vec::new(),
+                    }];
+
+                other_intersections[intersecting_segment_endpoint_index
+                    - if intersecting_segment_endpoint_index < intersection_index {
+                        0
+                    } else {
+                        1
+                    }]
+                .replace_intersecting_index(intersecting_segment_index, new_segment_index);
+
+                segments[intersecting_segment_index][1] = intersection.position();
+            }
+        }
+    }
+
+    new_segments
+}
+
+pub fn vertices_to_adjacency_list(
+    vertices: Vec<IntersectionPoint>,
+    segments: &[Segment],
+) -> (Vec<Point>, HashMap<usize, HashSet<usize>>) {
+    let inverse_vertices: HashMap<&IntersectionPoint, usize> = HashMap::from_iter(
+        vertices
+            .iter()
+            .enumerate()
+            .map(|(i, intersection)| (intersection, i)),
+    );
+
+    let adjacency_list = vertices
+        .iter()
+        .enumerate()
+        .map(|(i, intersection)| {
+            let all_connected_vertex_indices = intersection
+                .intersecting_segment_indices
+                .iter()
+                .flat_map(|&segment_index| segments[segment_index]);
+            let all_conneced_vertices = all_connected_vertex_indices
+                .map(|vertex| {
+                    inverse_vertices[&IntersectionPoint {
+                        position: vertex,
+                        intersecting_segment_indices: Vec::new(),
+                    }]
+                })
+                .filter(|&vertex_index| vertex_index != i)
+                .collect();
+            (i, all_conneced_vertices)
+        })
+        .collect();
+
+    (
+        vertices
+            .into_iter()
+            .map(|IntersectionPoint { position, .. }| position)
+            .collect(),
+        adjacency_list,
+    )
+}
+
 #[cfg(test)]
 mod test {
     use crate::street_graph::{
@@ -536,7 +669,7 @@ mod test {
 
     use super::{
         EventPoint, EventPointType, Segment, SkipList, calc_intersection_point, find_interesctions,
-        update_status,
+        split_segments_at_intersections, update_status, vertices_to_adjacency_list,
     };
 
     fn same_intersecting_segments(test: Vec<usize>, expected: Vec<usize>) -> bool {
@@ -1985,5 +2118,249 @@ mod test {
             intersections[0].position(),
             calc_intersection_point_unbounded(segments[0], segments[1])
         ));
+    }
+
+    #[test]
+    fn right_angle_intersection() {
+        let segments = vec![
+            [Point::new(2.0, 1.0), Point::new(2.0, 4.0)],
+            [Point::new(2.0, 4.0), Point::new(4.0, 4.0)],
+            [Point::new(4.0, 2.0), Point::new(4.0, 4.0)],
+        ];
+
+        let intersections = find_interesctions(&segments);
+
+        assert_eq!(intersections.len(), 2);
+        assert!(intersections[0].position() == Point::new(2.0, 4.0));
+        assert!(intersections[1].position() == Point::new(4.0, 4.0));
+    }
+
+    #[test]
+    fn simple_split_segments_preprocess() {
+        let mut segments = vec![
+            [Point::new(0.0, 0.0), Point::new(4.0, 2.0)],
+            [Point::new(2.0, 1.0), Point::new(2.0, 4.0)],
+            [Point::new(2.0, 4.0), Point::new(4.0, 4.0)],
+            [Point::new(4.0, 2.0), Point::new(4.0, 4.0)],
+        ];
+
+        let intersections = find_interesctions(&segments);
+
+        let mut all_intersections_set =
+            HashSet::<IntersectionPoint>::from_iter(intersections.clone());
+
+        segments.iter().enumerate().for_each(|(i, segment)| {
+            all_intersections_set.insert(IntersectionPoint {
+                position: segment[0],
+                intersecting_segment_indices: vec![i],
+            });
+            all_intersections_set.insert(IntersectionPoint {
+                position: segment[1],
+                intersecting_segment_indices: vec![i],
+            });
+        });
+
+        let mut all_intersections: Vec<IntersectionPoint> =
+            all_intersections_set.into_iter().collect();
+
+        let new_intersection_indices = all_intersections
+            .iter()
+            .enumerate()
+            .flat_map(|(i, intersection)| {
+                if intersections.contains(intersection) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let new_segments = split_segments_at_intersections(
+            &mut all_intersections,
+            new_intersection_indices,
+            &mut segments,
+        );
+
+        assert!(all_intersections.contains(&IntersectionPoint {
+            position: Point::new(2.0, 1.0),
+            intersecting_segment_indices: vec![0, 1, 4]
+        }));
+
+        assert_eq!(
+            new_segments,
+            vec![[Point::new(2.0, 1.0), Point::new(4.0, 2.0)]]
+        );
+    }
+
+    #[test]
+    fn complex_split_segments_preprocess() {
+        let mut segments = vec![
+            [Point::new(0.0, 0.0), Point::new(4.0, 2.0)],
+            [Point::new(2.0, 3.0), Point::new(2.0, 4.0)],
+            [Point::new(2.0, 4.0), Point::new(4.0, 4.0)],
+            [Point::new(4.0, 2.0), Point::new(4.0, 4.0)],
+            [Point::new(2.0, 3.0), Point::new(6.0, 2.0)],
+            [Point::new(6.0, 2.0), Point::new(0.0, 1.0)],
+        ];
+
+        let intersections = find_interesctions(&segments);
+
+        let mut all_intersections_set =
+            HashSet::<IntersectionPoint>::from_iter(intersections.clone());
+
+        segments.iter().enumerate().for_each(|(i, segment)| {
+            all_intersections_set.insert(IntersectionPoint {
+                position: segment[0],
+                intersecting_segment_indices: vec![i],
+            });
+            all_intersections_set.insert(IntersectionPoint {
+                position: segment[1],
+                intersecting_segment_indices: vec![i],
+            });
+        });
+
+        let mut all_intersections: Vec<IntersectionPoint> =
+            all_intersections_set.into_iter().collect();
+
+        let new_intersection_indices = all_intersections
+            .iter()
+            .enumerate()
+            .flat_map(|(i, intersection)| {
+                if intersections.contains(intersection) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let new_segments = split_segments_at_intersections(
+            &mut all_intersections,
+            new_intersection_indices,
+            &mut segments,
+        );
+
+        assert!(all_intersections.contains(&IntersectionPoint {
+            position: Point::new(4.0, 2.5),
+            intersecting_segment_indices: vec![3, 4, 6]
+        }));
+
+        assert!(all_intersections.contains(&IntersectionPoint {
+            position: Point::new(3.0, 1.5),
+            intersecting_segment_indices: vec![0, 5, 7]
+        }));
+
+        let expected_new_segments = vec![
+            [Point::new(4.0, 2.5), Point::new(6.0, 2.0)],
+            [Point::new(3.0, 1.5), Point::new(4.0, 2.0)],
+            [Point::new(3.0, 1.5), Point::new(0.0, 1.0)],
+            [Point::new(4.0, 2.5), Point::new(4.0, 4.0)],
+        ];
+
+        assert_eq!(new_segments.len(), expected_new_segments.len());
+
+        for new_segment in &expected_new_segments {
+            assert!(new_segments.contains(new_segment));
+        }
+    }
+
+    #[test]
+    fn simple_segments_to_adjacency_list() {
+        let mut segments = vec![
+            [Point::new(0.0, 0.0), Point::new(4.0, 2.0)],
+            [Point::new(2.0, 1.0), Point::new(2.0, 4.0)],
+            [Point::new(2.0, 4.0), Point::new(4.0, 4.0)],
+            [Point::new(4.0, 2.0), Point::new(4.0, 4.0)],
+        ];
+
+        let intersections = find_interesctions(&segments);
+
+        let mut all_intersections_set =
+            HashSet::<IntersectionPoint>::from_iter(intersections.clone());
+
+        segments.iter().enumerate().for_each(|(i, segment)| {
+            all_intersections_set.insert(IntersectionPoint {
+                position: segment[0],
+                intersecting_segment_indices: vec![i],
+            });
+            all_intersections_set.insert(IntersectionPoint {
+                position: segment[1],
+                intersecting_segment_indices: vec![i],
+            });
+        });
+
+        let mut all_intersections: Vec<IntersectionPoint> =
+            all_intersections_set.into_iter().collect();
+
+        let new_intersection_indices = all_intersections
+            .iter()
+            .enumerate()
+            .flat_map(|(i, intersection)| {
+                if intersections.contains(intersection) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let new_segments = split_segments_at_intersections(
+            &mut all_intersections,
+            new_intersection_indices,
+            &mut segments,
+        );
+
+        let all_segments: Vec<Segment> = segments.into_iter().chain(new_segments).collect();
+        let (vertices, adjacency_list) =
+            vertices_to_adjacency_list(all_intersections, &all_segments);
+
+        let expected_vertices = [
+            Point::new(0.0, 0.0),
+            Point::new(4.0, 2.0),
+            Point::new(2.0, 1.0),
+            Point::new(2.0, 4.0),
+            Point::new(4.0, 4.0),
+        ];
+
+        assert_eq!(vertices.len(), expected_vertices.len());
+        for vertex in &expected_vertices {
+            assert!(expected_vertices.contains(vertex));
+        }
+
+        let expected_adjacency_list = [
+            vec![Point::new(2.0, 1.0)],
+            vec![Point::new(2.0, 1.0), Point::new(4.0, 4.0)],
+            vec![
+                Point::new(0.0, 0.0),
+                Point::new(4.0, 2.0),
+                Point::new(2.0, 4.0),
+            ],
+            vec![Point::new(2.0, 1.0), Point::new(4.0, 4.0)],
+            vec![Point::new(2.0, 4.0), Point::new(4.0, 2.0)],
+        ];
+
+        for (i, expected_list) in expected_adjacency_list.iter().enumerate() {
+            let real_connected_vertices: Vec<IntersectionPoint> = adjacency_list[&vertices
+                .iter()
+                .position(|vertex| vertex == &expected_vertices[i])
+                .unwrap()]
+                .iter()
+                .map(|index| IntersectionPoint {
+                    position: vertices[*index],
+                    intersecting_segment_indices: Vec::new(),
+                })
+                .collect();
+
+            assert_eq!(real_connected_vertices.len(), expected_list.len());
+
+            assert_eq!(
+                HashSet::<IntersectionPoint>::from_iter(real_connected_vertices)
+                    .difference(&HashSet::from_iter(expected_list.iter().map(|pos| {
+                        IntersectionPoint {
+                            position: *pos,
+                            intersecting_segment_indices: Vec::new(),
+                        }
+                    })))
+                    .count(),
+                0
+            );
+        }
     }
 }

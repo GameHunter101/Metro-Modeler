@@ -62,12 +62,16 @@ async fn main() {
 
     let major_network_major_curves_len = major_network_major_curves_unconnected.len();
 
-    let major_network_curves_unconnected: Vec<HermiteCurve> = major_network_major_curves_unconnected
-        .into_iter()
-        .chain(major_network_minor_curves_unconnected)
-        .collect();
+    let major_network_curves_unconnected: Vec<HermiteCurve> =
+        major_network_major_curves_unconnected
+            .into_iter()
+            .chain(major_network_minor_curves_unconnected)
+            .collect();
     let major_network_merge_distance = 5.0;
-    let major_network_curves = merge_road_endings(&major_network_curves_unconnected, major_network_merge_distance);
+    let major_network_curves = merge_road_endings(
+        &major_network_curves_unconnected,
+        major_network_merge_distance,
+    );
 
     let minor_network_seed_points: Vec<SeedPoint> = major_network_curves
         .iter()
@@ -83,11 +87,8 @@ async fn main() {
         .collect();
 
     let major_network: Result<Vec<Vec<Point>>, tokio::task::JoinError> = futures::future::join_all(
-        /* major_network_major_curves
-        .clone()
-        .into_iter()
-        .chain(major_network_minor_curves.clone()) */
-        major_network_curves.clone()
+        major_network_curves
+            .clone()
             .into_iter()
             .map(|curve| tokio::spawn(async { resample_curve(curve, 20) })),
     )
@@ -97,10 +98,8 @@ async fn main() {
 
     let major_network = major_network.unwrap();
 
-    let all_curves: Vec<_> = /* major_network_major_curves
+    let all_curves: Vec<_> = major_network_curves
         .iter()
-        .chain(&major_network_minor_curves) */
-    major_network_curves.iter()
         .map(|curve| {
             curve
                 .into_iter()
@@ -119,18 +118,16 @@ async fn main() {
                 .collect::<Vec<_>>()
         })
         .collect();
-    println!(
+    /* println!(
         "{:?}",
         major_network_segments
             .iter()
             .flat_map(|segment| [(segment[0].x, segment[0].y), (segment[1].x, segment[1].y)])
             .collect::<Vec<_>>()
-    );
-    println!("Starting to find intersections");
+    ); */
     let major_intersections = find_interesctions(&major_network_segments);
-    println!("Done with intersections");
 
-    println!(
+    /* println!(
         "{:?}",
         major_intersections
             .iter()
@@ -153,7 +150,7 @@ async fn main() {
             )
             // .map(|pos| (pos.position.x, pos.position.y))
             .collect::<Vec<_>>()
-    );
+    ); */
 
     let (minor_network_major_curves_unconnected, minor_network_minor_curves_unconnected) =
         trace_street_plan(
@@ -166,8 +163,12 @@ async fn main() {
             major_network_curves[major_network_major_curves_len..].to_vec(),
         );
 
-    let minor_network_curves_unconnected: Vec<HermiteCurve> = minor_network_major_curves_unconnected.into_iter().chain(minor_network_minor_curves_unconnected).collect();
-    let minor_network_merge_distance = 7.0;
+    let minor_network_curves_unconnected: Vec<HermiteCurve> =
+        minor_network_major_curves_unconnected
+            .into_iter()
+            .chain(minor_network_minor_curves_unconnected)
+            .collect();
+    let minor_network_merge_distance = 3.0;
     let minor_network_major_curves = merge_road_endings(
         &minor_network_curves_unconnected,
         minor_network_merge_distance,

@@ -454,7 +454,7 @@ impl NodeType {
                     } else {
                         let lhs_x = get_x_val_of_segment_at_height(segments[*lhs], height);
                         let rhs_x = get_x_val_of_segment_at_height(segments[*rhs], height);
-                        if (rhs_x - lhs_x).abs() < 0.0001 {
+                        if (rhs_x - lhs_x).abs() < 0.001 {
                             Ordering::Equal
                         } else {
                             lhs_x.partial_cmp(&rhs_x).unwrap_or(Ordering::Less)
