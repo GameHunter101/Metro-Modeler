@@ -1,6 +1,6 @@
 use image::{EncodableLayout, ImageBuffer};
 use nalgebra::Vector2;
-use street_graph::find_interesctions;
+use street_graph::path_to_graph;
 use street_plan::{HermiteCurve, SeedPoint, merge_road_endings, resample_curve, trace_street_plan};
 use tensor_field::{DesignElement, EvalEigenvectors, GRID_SIZE, Point, TensorField};
 use v4::{
@@ -98,59 +98,9 @@ async fn main() {
 
     let major_network = major_network.unwrap();
 
-    let all_curves: Vec<_> = major_network_curves
-        .iter()
-        .map(|curve| {
-            curve
-                .into_iter()
-                .map(|pos| pos.position)
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let major_network_dcel = path_to_graph(&major_network_curves);
 
-    let major_network_segments: Vec<[Point; 2]> = all_curves
-        .iter()
-        .flat_map(|curve| {
-            curve[..curve.len() - 1]
-                .into_iter()
-                .enumerate()
-                .map(|(i, point)| [*point, curve[i + 1]])
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    /* println!(
-        "{:?}",
-        major_network_segments
-            .iter()
-            .flat_map(|segment| [(segment[0].x, segment[0].y), (segment[1].x, segment[1].y)])
-            .collect::<Vec<_>>()
-    ); */
-    let major_intersections = find_interesctions(&major_network_segments);
-
-    /* println!(
-        "{:?}",
-        major_intersections
-            .iter()
-            .flat_map(
-                |street_graph::IntersectionPoint {
-                     position,
-                     intersecting_segment_indices,
-                 }| {
-                    if intersecting_segment_indices.len() == 2
-                        && (intersecting_segment_indices[0] as i32
-                            - intersecting_segment_indices[1] as i32)
-                            .abs()
-                            == 1
-                    {
-                        None
-                    } else {
-                        Some((position.x, position.y))
-                    }
-                }
-            )
-            // .map(|pos| (pos.position.x, pos.position.y))
-            .collect::<Vec<_>>()
-    ); */
+    println!("Faces: {:?}", major_network_dcel.faces());
 
     let (minor_network_major_curves_unconnected, minor_network_minor_curves_unconnected) =
         trace_street_plan(
@@ -338,37 +288,6 @@ async fn main() {
                             }).collect::<Vec<_>>()
                         }).collect(),
                     enabled_models: major_network.iter().enumerate().map(|(i, _)| (i, None)).collect()
-                )
-            ]
-        },
-        "major_intersections" = {
-            material: {
-                pipeline: {
-                    vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
-                    fragment_shader_path: "./shaders/visualizer_fragment.wgsl",
-                    vertex_layouts: [Vertex::vertex_layout()],
-                    uses_camera: false,
-                    geometry_details: {
-                        topology: wgpu::PrimitiveTopology::PointList,
-                        polygon_mode: wgpu::PolygonMode::Point,
-                    },
-                }
-            },
-            components: [
-                MeshComponent(
-                    vertices:
-                        vec![major_intersections.iter().map(|intersection| {
-                            let pos = intersection.position();
-                            Vertex {
-                                pos: [
-                                    2.0 * pos.x / GRID_SIZE as f32 - 1.0,
-                                    2.0 * pos.y / GRID_SIZE as f32 - 1.0,
-                                    0.0,
-                                ],
-                                col: [0.0, 1.0, 0.0, 1.0]
-                            }
-                        }).collect()],
-                    enabled_models: vec![(0, None)]
                 )
             ]
         },

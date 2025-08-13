@@ -2,11 +2,13 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
+use cool_utils::data_structures::dcel::{DCEL, Face};
 use nalgebra::Vector2;
 use ordered_float::OrderedFloat;
 
 use crate::event_queue::EventQueue;
 use crate::status::{SkipList, get_x_val_of_segment_at_height};
+use crate::street_plan::HermiteCurve;
 use crate::tensor_field::Point;
 
 #[derive(Debug, PartialOrd, Clone)]
@@ -550,9 +552,16 @@ fn calc_intersection_point_unbounded(segment_0: Segment, segment_1: Segment) -> 
     let s = segment_1[1];
 
     let denominator = cross(s - q, r - p);
-
-    let u = cross(p - q, s - q) / denominator;
-    p + u * (r - p)
+    if denominator == 0.0 {
+        if segment_0[1] == segment_1[0] {
+            segment_0[1]
+        } else {
+            segment_0[0]
+        }
+    } else {
+        let u = cross(p - q, s - q) / denominator;
+        p + u * (r - p)
+    }
 }
 
 pub fn points_are_close(p_1: Point, p_2: Point) -> bool {
@@ -658,18 +667,127 @@ pub fn vertices_to_adjacency_list(
     )
 }
 
+pub fn path_to_graph(paths: &[HermiteCurve]) -> DCEL {
+    let all_segment_points = paths.iter().map(|curve| {
+        curve
+            .into_iter()
+            .map(|pos| pos.position)
+            .collect::<Vec<_>>()
+    });
+
+    let mut segments: Vec<[Point; 2]> = all_segment_points
+        .flat_map(|curve| {
+            curve[..curve.len() - 1]
+                .into_iter()
+                .enumerate()
+                .map(|(i, point)| [*point, curve[i + 1]])
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    let intersections: HashSet<IntersectionPoint> =
+        HashSet::from_iter(find_interesctions(&segments));
+
+    let mut all_intersections_set = intersections.clone();
+
+    segments.iter().enumerate().for_each(|(i, segment)| {
+        all_intersections_set.insert(IntersectionPoint {
+            position: segment[0],
+            intersecting_segment_indices: vec![i],
+        });
+        all_intersections_set.insert(IntersectionPoint {
+            position: segment[1],
+            intersecting_segment_indices: vec![i],
+        });
+    });
+
+    let mut all_intersections: Vec<IntersectionPoint> = all_intersections_set.into_iter().collect();
+
+    let new_intersection_indices = all_intersections
+        .iter()
+        .enumerate()
+        .flat_map(|(i, intersection)| {
+            if intersections.contains(intersection) {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let new_segments = split_segments_at_intersections(
+        &mut all_intersections,
+        new_intersection_indices,
+        &mut segments,
+    );
+
+    let all_segments: Vec<Segment> = segments.into_iter().chain(new_segments).collect();
+    let (vertices, adjacency_list) = vertices_to_adjacency_list(all_intersections, &all_segments);
+    println!("Verts: {:?}", vertices.iter().map(|point| (point.x, point.y)).collect::<Vec<_>>());
+
+    DCEL::new(vertices, adjacency_list)
+}
+
+fn segments_to_adjacency_list(
+    segments: &mut [Segment],
+) -> (Vec<Point>, HashMap<usize, HashSet<usize>>) {
+    let intersections: HashSet<IntersectionPoint> =
+        HashSet::from_iter(find_interesctions(&segments));
+
+    let mut all_intersections_set = intersections.clone();
+
+    segments.iter().enumerate().for_each(|(i, segment)| {
+        all_intersections_set.insert(IntersectionPoint {
+            position: segment[0],
+            intersecting_segment_indices: vec![i],
+        });
+        all_intersections_set.insert(IntersectionPoint {
+            position: segment[1],
+            intersecting_segment_indices: vec![i],
+        });
+    });
+
+    let mut all_intersections: Vec<IntersectionPoint> = all_intersections_set.into_iter().collect();
+
+    let new_intersection_indices = all_intersections
+        .iter()
+        .enumerate()
+        .flat_map(|(i, intersection)| {
+            if intersections.contains(intersection) {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let new_segments =
+        split_segments_at_intersections(&mut all_intersections, new_intersection_indices, segments);
+
+    let all_segments: Vec<Segment> = segments.to_vec().into_iter().chain(new_segments).collect();
+
+    vertices_to_adjacency_list(all_intersections, &all_segments)
+}
+
 #[cfg(test)]
 mod test {
-    use crate::street_graph::{
-        calc_intersection_point_unbounded, points_are_close, sort_joint_segments,
+    use ordered_float::OrderedFloat;
+
+    use crate::{
+        street_graph::{
+            calc_intersection_point_unbounded, path_to_graph, points_are_close, sort_joint_segments,
+        },
+        street_plan::ControlPoint,
     };
-    use std::{collections::HashSet, iter};
+    use std::{
+        collections::{HashMap, HashSet},
+        iter,
+    };
 
     use crate::{event_queue::EventQueue, street_graph::IntersectionPoint, tensor_field::Point};
 
     use super::{
         EventPoint, EventPointType, Segment, SkipList, calc_intersection_point, find_interesctions,
-        split_segments_at_intersections, update_status, vertices_to_adjacency_list,
+        segments_to_adjacency_list, split_segments_at_intersections, update_status,
+        vertices_to_adjacency_list,
     };
 
     fn same_intersecting_segments(test: Vec<usize>, expected: Vec<usize>) -> bool {
@@ -707,7 +825,7 @@ mod test {
 
         assert_eq!(
             sort_joint_segments(&[0, 1, 2, 3, 4], &segments, false),
-            (vec![4, 2, 1, 0, 3], 0.0)
+            (vec![2, 1, 0, 3, 4], 0.0)
         );
     }
 
@@ -734,8 +852,8 @@ mod test {
         ];
 
         assert_eq!(
-            sort_joint_segments(&[0, 1, 2, 3], &segments, false),
-            (vec![2, 0, 3, 1], 0.0)
+            sort_joint_segments(&[0, 1, 2, 3], &segments, true),
+            (vec![2, 1, 3, 0], 2.0)
         );
     }
 
@@ -2362,5 +2480,116 @@ mod test {
                 0
             );
         }
+    }
+
+    #[test]
+    fn straight_line_to_adjacency_list() {
+        let mut segments = vec![
+            [
+                Point::new(466.0258, 498.15332),
+                Point::new(469.41873, 464.32245),
+            ],
+            [
+                Point::new(469.41873, 464.32245),
+                Point::new(471.41458, 444.42194),
+            ],
+            [
+                Point::new(471.41458, 444.42194),
+                Point::new(473.41043, 424.52142),
+            ],
+            [
+                Point::new(473.41043, 424.52142),
+                Point::new(475.40628, 404.6209),
+            ],
+            [
+                Point::new(475.40628, 404.6209),
+                Point::new(477.3223, 385.51642),
+            ],
+        ];
+
+        let (vertices, adjacency_list) = segments_to_adjacency_list(&mut segments);
+
+        let expected_vertices = vec![
+            Point::new(466.0258, 498.15332),
+            Point::new(469.41873, 464.32245),
+            Point::new(471.41458, 444.42194),
+            Point::new(473.41043, 424.52142),
+            Point::new(475.40628, 404.6209),
+            Point::new(477.3223, 385.51642),
+        ];
+
+        let expected_adjacency_list: HashMap<usize, HashSet<usize>> = HashMap::from_iter(vec![
+            (0, HashSet::from_iter(vec![1])),
+            (1, HashSet::from_iter(vec![0, 2])),
+            (2, HashSet::from_iter(vec![1, 3])),
+            (3, HashSet::from_iter(vec![2, 4])),
+            (4, HashSet::from_iter(vec![3, 5])),
+            (5, HashSet::from_iter(vec![4])),
+        ]);
+
+        assert_eq!(vertices.len(), expected_vertices.len());
+        for vert in &expected_vertices {
+            assert!(vertices.contains(vert));
+        }
+
+        for (vert_index, vert_neighbors_indices) in adjacency_list {
+            let expected_vert_index = expected_vertices
+                .iter()
+                .position(|pos| pos == &vertices[vert_index])
+                .unwrap();
+            let expected_neighbors_indices = &expected_adjacency_list[&expected_vert_index];
+            let expected_neighbors_vertices: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> =
+                expected_neighbors_indices
+                    .iter()
+                    .map(|&idx| {
+                        (
+                            OrderedFloat(expected_vertices[idx].x),
+                            OrderedFloat(expected_vertices[idx].y),
+                        )
+                    })
+                    .collect();
+            let real_neighbor_vertices: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> =
+                vert_neighbors_indices
+                    .iter()
+                    .map(|&idx| (OrderedFloat(vertices[idx].x), OrderedFloat(vertices[idx].y)))
+                    .collect();
+
+            assert_eq!(expected_neighbors_vertices.len(), real_neighbor_vertices.len());
+            assert_eq!(expected_neighbors_vertices.difference(&real_neighbor_vertices).count(), 0);
+        }
+    }
+
+    #[test]
+    fn straight_line_to_dcel() {
+        let curve = vec![
+            ControlPoint {
+                position: Point::new(466.0258, 498.15332),
+                velocity: Point::zeros(),
+            },
+            ControlPoint {
+                position: Point::new(469.41873, 464.32245),
+                velocity: Point::zeros(),
+            },
+            ControlPoint {
+                position: Point::new(471.41458, 444.42194),
+                velocity: Point::zeros(),
+            },
+            ControlPoint {
+                position: Point::new(473.41043, 424.52142),
+                velocity: Point::zeros(),
+            },
+            ControlPoint {
+                position: Point::new(475.40628, 404.6209),
+                velocity: Point::zeros(),
+            },
+            ControlPoint {
+                position: Point::new(477.3223, 385.51642),
+                velocity: Point::zeros(),
+            },
+        ];
+
+        let dcel = path_to_graph(&[curve]);
+
+        assert!(dcel.faces().is_empty());
     }
 }
