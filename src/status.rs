@@ -9,7 +9,7 @@ type Link = NonNull<Node>;
 pub struct SkipList {
     nodes: Link,
     end: Link,
-    rng: ThreadRng,
+    rng: StdRng,
     len: usize,
 }
 
@@ -17,10 +17,12 @@ impl SkipList {
     pub fn new() -> Self {
         unsafe {
             let nodes = Node::new_empty_chain();
+            let mut rng_seed_gen = rand::rng();
+            let rng_seed = rng_seed_gen.random();
             Self {
                 nodes,
                 end: nodes.as_ref().next_ptrs[0],
-                rng: rand::rng(),
+                rng: StdRng::seed_from_u64(rng_seed),
                 len: 0,
             }
         }
@@ -33,14 +35,8 @@ impl SkipList {
         height: f32,
     ) -> (Option<usize>, Option<usize>) {
         unsafe {
-            let (traverse_node, traverse_path) = Node::traverse_level(
-                self.nodes,
-                (*self.nodes.as_ptr()).next_ptrs.len() - 1,
-                element.clone(),
-                segments,
-                height,
-                false,
-            );
+            let (traverse_node, traverse_path) =
+                self.traverse_nodes(element, segments, height, false);
 
             self.len += 1;
 
@@ -65,29 +61,50 @@ impl SkipList {
                         get_x_val_of_segment_at_height(appending_segment, highest_end);
 
                     if target_x_at_highest_end < appending_x_at_highest_end {
+                        let new_appendee = (&(*traverse_node.as_ptr()).prev_ptrs)[0];
+                        let new_path = traverse_path
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, ptr)| {
+                                if ptr == traverse_node {
+                                    ptr.as_ref().prev_ptrs[i + 1]
+                                } else {
+                                    ptr
+                                }
+                            })
+                            .collect();
                         return Node::append(
                             self.nodes,
                             self.end,
-                            (&(*traverse_node.as_ptr()).prev_ptrs)[0],
+                            new_appendee,
                             element,
-                            traverse_path
-                                .into_iter()
-                                .filter(|ptr| *ptr != traverse_node)
-                                .collect(),
+                            new_path,
                             &mut self.rng,
                         );
                     }
                 }
             }
 
-            Node::append(
+            let mut append_node = traverse_node;
+
+            while (*(&(*append_node.as_ptr()).next_ptrs)[0].as_ptr())
+                .node_type
+                .cmp(&(*traverse_node.as_ptr()).node_type, segments, height)
+                == Ordering::Equal
+            {
+                append_node = (&(*append_node.as_ptr()).next_ptrs)[0];
+            }
+
+            let res = Node::append(
                 self.nodes,
                 self.end,
-                traverse_node,
+                append_node,
                 element,
                 traverse_path,
                 &mut self.rng,
-            )
+            );
+
+            res
         }
     }
 
@@ -98,15 +115,7 @@ impl SkipList {
         height: f32,
     ) -> (Option<usize>, Option<usize>) {
         unsafe {
-            let list_height = (*self.nodes.as_ptr()).next_ptrs.len();
-            let (traverse_target, _) = Node::traverse_level(
-                self.nodes,
-                list_height - 1,
-                element.clone(),
-                segments,
-                height,
-                true,
-            );
+            let (traverse_target, _) = self.traverse_nodes(element, segments, height, true);
 
             if (*traverse_target.as_ptr()).node_type.cmp(
                 &NodeType::Value(element),
@@ -168,17 +177,23 @@ impl SkipList {
         );
 
         unsafe {
-            let (low_node, _) = Node::traverse_level(
-                self.nodes,
-                (*self.nodes.as_ptr()).next_ptrs.len() - 1,
-                low,
-                segments,
-                height,
-                true,
-            );
+            let (initial_search, _) = self.traverse_nodes(low, segments, height, false);
 
-            let mut high_node = (&(*low_node.as_ptr()).next_ptrs)[0];
-            while (*high_node.as_ptr()).node_type != NodeType::Value(high) {
+            let mut low_node = initial_search;
+            while (*(&(*low_node.as_ptr()).prev_ptrs)[0].as_ptr())
+                .node_type
+                .cmp(&NodeType::Value(low), segments, height)
+                == Ordering::Equal
+            {
+                low_node = (&(*low_node.as_ptr()).prev_ptrs)[0];
+            }
+
+            let mut high_node = low_node;
+            while (*(&(*high_node.as_ptr()).next_ptrs)[0].as_ptr())
+                .node_type
+                .cmp(&NodeType::Value(high), segments, height)
+                == Ordering::Equal
+            {
                 high_node = (&(*high_node.as_ptr()).next_ptrs)[0];
             }
 
@@ -226,6 +241,66 @@ impl SkipList {
         }
     }
 
+    fn traverse_nodes(
+        &self,
+        element: usize,
+        segments: &[Segment],
+        height: f32,
+        precise_search: bool,
+    ) -> (Link, Vec<Link>) {
+        unsafe {
+            let mut current_node = self.nodes;
+            let mut level = self.height() - 1;
+            let mut path = Vec::with_capacity(self.height());
+
+            let mut traverse_res = current_node;
+
+            while let Some(next_node) = current_node.as_ref().next_ptrs.get(level) {
+                let next_compared_with_element = (*next_node.as_ptr()).node_type.cmp(
+                    &NodeType::Value(element),
+                    segments,
+                    height,
+                );
+                if next_compared_with_element == Ordering::Greater {
+                    if level == 0 {
+                        if (*current_node.as_ptr()).node_type.cmp(
+                            &NodeType::Value(element),
+                            segments,
+                            height,
+                        ) == Ordering::Equal
+                        {
+                            let mut refined = current_node;
+                            while let Some(refined_prev) = refined.as_ref().prev_ptrs.get(0)
+                                && (*refined.as_ptr()).node_type != NodeType::Value(element)
+                                && precise_search
+                            {
+                                refined = *refined_prev;
+                            }
+                            traverse_res = refined;
+                        } else {
+                            traverse_res = current_node;
+                        }
+                        break;
+                    } else {
+                        level -= 1;
+                        path.push(current_node);
+                    }
+                } else {
+                    current_node = *next_node;
+                }
+            }
+
+            path.reverse();
+
+            assert_eq!(path.len(), self.height() - 1);
+            (traverse_res, path)
+        }
+    }
+
+    pub fn height(&self) -> usize {
+        unsafe { (&(*self.nodes.as_ptr()).next_ptrs).len() }
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
@@ -249,6 +324,15 @@ impl SkipList {
                 }
             })
             .collect()
+    }
+
+    pub fn is_sorted(&self, height: f32, segments: &[Segment]) -> bool {
+        let arr = self.to_vec();
+        arr.is_sorted_by(|a, b| {
+            let a_x = get_x_val_of_segment_at_height(segments[*a], height);
+            let b_x = get_x_val_of_segment_at_height(segments[*b], height);
+            a_x <= b_x + 0.001
+        })
     }
 }
 
@@ -292,75 +376,23 @@ impl Node {
         }
     }
 
-    fn traverse_level(
-        start: Link,
-        level: usize,
-        element: usize,
-        segments: &[Segment],
-        height: f32,
-        precise_search: bool,
-    ) -> (Link, Vec<Link>) {
-        unsafe {
-            if let Some(next) = start.as_ref().next_ptrs.get(level).copied() {
-                if (*next.as_ptr())
-                    .node_type
-                    .cmp(&NodeType::Value(element), segments, height)
-                    == Ordering::Greater
-                {
-                    if level == 0 {
-                        if (*start.as_ptr()).node_type.cmp(
-                            &NodeType::Value(element),
-                            segments,
-                            height,
-                        ) == Ordering::Equal
-                        {
-                            let mut refine = start;
-                            while let Some(refine_prev) = (&(*refine.as_ptr()).prev_ptrs).get(0)
-                                && (*refine.as_ptr()).node_type != NodeType::Value(element)
-                                && precise_search
-                            {
-                                refine = *refine_prev;
-                            }
-                            (refine, Vec::new())
-                        } else {
-                            (start, Vec::new())
-                        }
-                    } else {
-                        let (node, mut path) = Self::traverse_level(
-                            start,
-                            level - 1,
-                            element,
-                            segments,
-                            height,
-                            precise_search,
-                        );
-                        path.push(start);
-                        (node, path)
-                    }
-                } else {
-                    Self::traverse_level(next, level, element, segments, height, precise_search)
-                }
-            } else {
-                (start, Vec::new())
-            }
-        }
-    }
-
     fn append(
         origin: Link,
         end: Link,
         node: Link,
         element: usize,
         traversal_path: Vec<Link>,
-        rng: &mut ThreadRng,
+        rng: &mut impl Rng,
     ) -> (Option<usize>, Option<usize>) {
         unsafe {
-            let max_possible_height = traversal_path.len() + 1;
+            let max_possible_height = (&(*origin.as_ptr()).next_ptrs).len();
             let height = rng.random_range(1..=max_possible_height);
 
             let all_previous_nodes: Vec<Link> = std::iter::once(node)
                 .chain(traversal_path.iter().copied())
                 .collect();
+
+            assert_eq!(all_previous_nodes.len(), max_possible_height);
 
             let (prev_ptrs, next_ptrs): (Vec<Link>, Vec<Link>) = (0..height)
                 .map(|level| {

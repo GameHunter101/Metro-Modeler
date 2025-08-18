@@ -631,7 +631,7 @@ pub fn point_second_deriv(point_index: usize, path: &[Point]) -> Vector2<f32> {
         - point_first_deriv(point_index - 1, path).normalize()
 }
 
-pub fn resample_curve(control_points: Vec<ControlPoint>, points_per_spline: i32) -> Vec<Point> {
+pub fn resample_curve(control_points: &[ControlPoint], points_per_spline: i32) -> Vec<Point> {
     let sampler = |p_0: Point, p_1: Point, m_0: Vector2<f32>, m_1: Vector2<f32>| -> Vec<Point> {
         (0..=points_per_spline)
             .map(|i| {

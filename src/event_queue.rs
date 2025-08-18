@@ -152,6 +152,13 @@ impl EventQueue {
         };
         unsafe {
             let value = (*node_ptr.as_ptr()).value.clone();
+            if !self.tree.search(&value) {
+                println!("Searching: {value:?}");
+                self.tree.search(&value);
+                println!("{{");
+                self.tree.print();
+                println!("}}");
+            }
             if self.tree.delete(&value) {
                 Some(value)
             } else {
@@ -179,6 +186,12 @@ impl EventQueue {
                 };
                 left_res && right_res
             })
+        }
+    }
+
+    pub fn peek(&self) -> Option<&EventPoint> {
+        unsafe {
+            self.arr.get(0).map(|ptr| &ptr.as_ref().value)
         }
     }
 
