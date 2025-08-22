@@ -772,9 +772,7 @@ fn list_segments_and_the_points_that_intersect_them(
     points_on_each_segment
 }
 
-pub fn path_to_graph<const MAX_VERTS: usize>(
-    paths: &[HermiteCurve],
-) -> (Vec<Point>, DCEL<MAX_VERTS>) {
+pub fn path_to_graph(paths: &[HermiteCurve]) -> (Vec<Point>, DCEL) {
     let all_segment_points = paths.iter().map(|curve| {
         curve
             .into_iter()
@@ -794,7 +792,9 @@ pub fn path_to_graph<const MAX_VERTS: usize>(
 
     let (vertices, adjacency_list) = segments_to_adjacency_list(&mut segments);
 
-    let dcel = DCEL::<MAX_VERTS>::new(&vertices, adjacency_list);
+    let pre_time = std::time::Instant::now();
+    let dcel = DCEL::new(&vertices, adjacency_list);
+    println!("DCEL time: {:?}", pre_time.elapsed().as_millis());
     (vertices, dcel)
 }
 
@@ -846,15 +846,6 @@ fn vertices_to_adjacency_list(
         })
         .collect();
 
-    dbg!(&adjacency_list);
-    println!(
-        "Verts: {:?}",
-        vertices
-            .iter()
-            .map(|IntersectionPoint { position, .. }| (position.x, position.y))
-            .collect::<Vec<_>>()
-    );
-
     (
         vertices
             .into_iter()
@@ -880,13 +871,6 @@ fn segments_to_adjacency_list(
 
     let mut intersections_vec: Vec<IntersectionPoint> = intersections.iter().cloned().collect();
 
-    /* println!(
-        "Intersections: {:?}",
-        intersections_vec
-            .iter()
-            .map(|IntersectionPoint { position, .. }| (position.x, position.y))
-            .collect::<Vec<_>>()
-    ); */
     let new_segments = split_segments_at_intersections(&mut intersections_vec, segments);
 
     let all_segments: Vec<Segment> = segments.to_vec().into_iter().chain(new_segments).collect();
@@ -2701,7 +2685,7 @@ mod test {
             },
         ];
 
-        let (_, dcel) = path_to_graph::<100>(&[curve]);
+        let (_, dcel) = path_to_graph(&[curve]);
 
         assert!(dcel.faces().is_empty());
     }
@@ -3154,7 +3138,7 @@ mod test {
         ];
 
         let (vertices, adjacency_list) = segments_to_adjacency_list(&mut segments);
-        let dcel = DCEL::<40>::new(&vertices, adjacency_list);
+        let dcel = DCEL::new(&vertices, adjacency_list);
 
         assert_eq!(dcel.faces().len(), 5);
     }

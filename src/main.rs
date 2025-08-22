@@ -128,7 +128,9 @@ async fn main() {
         minor_network_curves.iter().flatten().count()
     );
 
-    let (verts, major_network_dcel) = path_to_graph::<400>(&minor_network_curves);
+    let all_curves: Vec<HermiteCurve> = minor_network_curves.into_iter().chain(major_network_curves).collect();
+
+    let (verts, major_network_dcel) = path_to_graph(&all_curves);
 
     for face in major_network_dcel.faces() {
         println!(
