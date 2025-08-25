@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 use cool_utils::data_structures::dcel::DCEL;
+use nalgebra::Vector2;
 use ordered_float::OrderedFloat;
 
 use crate::event_queue::EventQueue;
@@ -772,7 +773,7 @@ fn list_segments_and_the_points_that_intersect_them(
     points_on_each_segment
 }
 
-pub fn path_to_graph(paths: &[HermiteCurve]) -> (Vec<Point>, DCEL) {
+pub fn path_to_graph(paths: &[HermiteCurve]) -> Vec<Vec<Point>> {
     let all_segment_points = paths.iter().map(|curve| {
         curve
             .into_iter()
@@ -792,16 +793,30 @@ pub fn path_to_graph(paths: &[HermiteCurve]) -> (Vec<Point>, DCEL) {
 
     let (vertices, adjacency_list) = segments_to_adjacency_list(&mut segments);
 
-    let pre_time = std::time::Instant::now();
     let dcel = DCEL::new(&vertices, adjacency_list);
-    println!("DCEL time: {:?}", pre_time.elapsed().as_millis());
-    (vertices, dcel)
+
+    let new_faces = dcel
+        .faces()
+        .iter()
+        .flat_map(|face_from_indices| {
+            correct_face_with_degenerate_points(
+                face_from_indices
+                    .iter()
+                    .map(|index| vertices[*index])
+                    .collect(),
+            )
+        })
+        .collect();
+
+    new_faces
 }
+
+type AdjacencyList = HashMap<usize, HashSet<usize>>;
 
 fn vertices_to_adjacency_list(
     vertices: Vec<IntersectionPoint>,
     segments: &[Segment],
-) -> (Vec<Point>, HashMap<usize, HashSet<usize>>) {
+) -> (Vec<Point>, AdjacencyList) {
     let inverse_vertices: HashMap<IntersectionPoint, usize> =
         HashMap::from_iter(vertices.iter().enumerate().map(
             |(
@@ -863,9 +878,7 @@ fn truncate_point_to_decimal_place(point: Point, decimal_places: u32) -> Point {
     Point::new(point_x / fac, point_y / fac)
 }
 
-fn segments_to_adjacency_list(
-    segments: &mut [Segment],
-) -> (Vec<Point>, HashMap<usize, HashSet<usize>>) {
+fn segments_to_adjacency_list(segments: &mut [Segment]) -> (Vec<Point>, AdjacencyList) {
     let intersections: HashSet<IntersectionPoint> =
         HashSet::from_iter(find_interesctions(&segments, true));
 
@@ -878,6 +891,198 @@ fn segments_to_adjacency_list(
     vertices_to_adjacency_list(intersections_vec, &all_segments)
 }
 
+fn correct_face_with_degenerate_points(face: Vec<Point>) -> Vec<Vec<Point>> {
+    let mut full_face = Vec::new();
+
+    let mut vertex_pos_to_index: HashMap<(OrderedFloat<f32>, OrderedFloat<f32>), usize> =
+        HashMap::new();
+
+    let mut adjacency_list = AdjacencyList::new();
+
+    let mut skipped_original_indices = HashSet::new();
+
+    for (current_vertex_index, vertex) in face.iter().enumerate() {
+        let point_as_key = (
+            OrderedFloat(truncate_point_to_decimal_place(*vertex, 3).x),
+            OrderedFloat(truncate_point_to_decimal_place(*vertex, 3).y),
+        );
+
+        let neighbors: Vec<usize> = if current_vertex_index == 0 {
+            vec![face.len() - 1, 1]
+        } else if current_vertex_index == face.len() - 1 {
+            vec![face.len() - 2, 0]
+        } else {
+            vec![current_vertex_index - 1, current_vertex_index + 1]
+        };
+
+        if let Some(existing_vertex_index) = vertex_pos_to_index.get(&point_as_key) {
+            adjacency_list
+                .get_mut(existing_vertex_index)
+                .unwrap()
+                .extend(neighbors);
+            skipped_original_indices.insert(current_vertex_index);
+        } else {
+            adjacency_list.insert(full_face.len(), HashSet::from_iter(neighbors));
+            vertex_pos_to_index.insert(point_as_key, full_face.len());
+            full_face.push(*vertex);
+        }
+    }
+
+    // Correct indices after skipping duplicates
+    for neighbors in adjacency_list.values_mut() {
+        for neighbor_index in neighbors.clone() {
+            let index_to_replace_with = if skipped_original_indices.contains(&neighbor_index) {
+                let truncated_pos = truncate_point_to_decimal_place(face[neighbor_index], 3);
+                vertex_pos_to_index[&(OrderedFloat(truncated_pos.x), OrderedFloat(truncated_pos.y))]
+            } else {
+                let offset = skipped_original_indices
+                    .iter()
+                    .map(|skipped_index| (neighbor_index > *skipped_index) as usize)
+                    .sum::<usize>();
+
+                neighbor_index - offset
+            };
+
+            neighbors.remove(&neighbor_index);
+            neighbors.insert(index_to_replace_with);
+        }
+    }
+
+    let mut degenerate_points_indices: Vec<usize> = (0..full_face.len())
+        .filter(|i| adjacency_list[i].len() == 1)
+        .collect();
+
+    degenerate_points_indices.sort_by(|a, b| {
+        let a_point = full_face[*a];
+        let b_point = full_face[*b];
+        a_point.y.total_cmp(&b_point.y).reverse()
+    });
+
+    for degenerate_point_index in degenerate_points_indices {
+        let degenerate_point = full_face[degenerate_point_index];
+        let degenerate_previous_point =
+            full_face[(degenerate_point_index as i32 - 1).rem_euclid(full_face.len() as i32) as usize];
+
+        let all_segments_by_indices: HashSet<(usize, usize)> =
+            HashSet::from_iter(adjacency_list.iter().flat_map(
+                |(vertex_index, vertex_neighbors)| {
+                    vertex_neighbors.iter().map(|neighbor_index| {
+                        (
+                            *vertex_index.min(neighbor_index),
+                            *vertex_index.max(neighbor_index),
+                        )
+                    })
+                },
+            ));
+
+        let segment_indices: Vec<(usize, usize)> = all_segments_by_indices
+            .iter()
+            .filter(|(p_0, p_1)| {
+                full_face[*p_0] != degenerate_point
+                    && full_face[*p_1] != degenerate_point
+                    && full_face[*p_0] != degenerate_previous_point
+                    && full_face[*p_1] != degenerate_previous_point
+            })
+            .copied()
+            .collect();
+
+        let segments: Vec<Segment> = segment_indices
+            .iter()
+            .map(|&(p_0, p_1)| [full_face[p_0], full_face[p_1]])
+            .collect();
+
+        let mut raycast_points = raycast_through_segments(
+            degenerate_point,
+            degenerate_point - degenerate_previous_point,
+            &segments,
+        );
+
+        raycast_points.sort_by(|a, b| {
+            (degenerate_point - a.0)
+                .norm_squared()
+                .total_cmp(&(degenerate_point - b.0).norm_squared())
+        });
+
+        let mut new_segment_origin_index = degenerate_point_index;
+
+        for (raycast_intersection, intersecting_segment_index) in raycast_points {
+            let new_point_index = full_face.len();
+            let (left_intersection_index, right_intersection_index) =
+                segment_indices[intersecting_segment_index];
+
+            adjacency_list.insert(
+                new_point_index,
+                HashSet::from_iter(vec![
+                    new_segment_origin_index,
+                    left_intersection_index,
+                    right_intersection_index,
+                ]),
+            );
+
+            let left_intersection_set = adjacency_list.get_mut(&left_intersection_index).unwrap();
+            left_intersection_set.insert(new_point_index);
+            left_intersection_set.remove(&right_intersection_index);
+            let right_intersection_set = adjacency_list.get_mut(&right_intersection_index).unwrap();
+            right_intersection_set.insert(new_point_index);
+            right_intersection_set.remove(&left_intersection_index);
+
+            full_face.push(raycast_intersection);
+            adjacency_list
+                .get_mut(&new_segment_origin_index)
+                .unwrap()
+                .insert(new_point_index);
+
+            new_segment_origin_index = new_point_index;
+        }
+    }
+
+    let dcel = DCEL::new(&full_face, adjacency_list);
+
+    dcel.faces()
+        .iter()
+        .map(|current_face| {
+            current_face
+                .iter()
+                .map(|index| full_face[*index])
+                .collect::<Vec<Point>>()
+        })
+        .collect()
+}
+
+fn raycast_through_segments(
+    origin: Point,
+    direction: Vector2<f32>,
+    segments: &[Segment],
+) -> Vec<(Point, usize)> {
+    let cross = |p_0: Point, p_1: Point| p_0.x * p_1.y - p_0.y * p_1.x;
+    segments
+        .iter()
+        .enumerate()
+        .flat_map(|(i, segment)| {
+            let p = segment[0];
+            let q = origin;
+            let r = segment[1];
+            let s = origin + direction;
+
+            let denominator = cross(s - q, r - p);
+            if denominator == 0.0 {
+                None
+            } else {
+                let u = cross(p - q, s - q) / denominator;
+                let new_pos = p + u * (r - p);
+                if u >= 0.0
+                    && u <= 1.0
+                    && (new_pos - origin).normalize().dot(&direction.normalize()) > 0.0
+                {
+                    Some((new_pos, i))
+                } else {
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod test {
     use cool_utils::data_structures::dcel::DCEL;
@@ -885,8 +1090,8 @@ mod test {
 
     use crate::{
         street_graph::{
-            calc_intersection_point_unbounded, path_to_graph, points_are_close, segment_end,
-            segment_start, sort_joint_segments,
+            AdjacencyList, calc_intersection_point_unbounded, path_to_graph, points_are_close,
+            segment_end, segment_start, sort_joint_segments,
         },
         street_plan::ControlPoint,
     };
@@ -898,9 +1103,9 @@ mod test {
     use crate::{event_queue::EventQueue, street_graph::IntersectionPoint, tensor_field::Point};
 
     use super::{
-        EventPoint, EventPointType, Segment, SkipList, calc_intersection_point, find_interesctions,
-        segments_to_adjacency_list, split_segments_at_intersections, update_status,
-        vertices_to_adjacency_list,
+        EventPoint, EventPointType, Segment, SkipList, calc_intersection_point,
+        correct_face_with_degenerate_points, find_interesctions, segments_to_adjacency_list,
+        split_segments_at_intersections, update_status, vertices_to_adjacency_list,
     };
 
     fn same_intersecting_segments(test: Vec<usize>, expected: Vec<usize>) -> bool {
@@ -2512,13 +2717,6 @@ mod test {
 
         let all_segments: Vec<Segment> = segments.into_iter().chain(new_segments).collect();
 
-        all_segments
-            .iter()
-            .for_each(|[p_0, p_1]| print!("polygon{:?}, ", ((p_0.x, p_0.y), (p_1.x, p_1.y))));
-        println!("");
-
-        dbg!(&all_intersections);
-
         let (vertices, adjacency_list) =
             vertices_to_adjacency_list(all_intersections, &all_segments);
 
@@ -2607,7 +2805,7 @@ mod test {
             Point::new(477.3223, 385.51642),
         ];
 
-        let expected_adjacency_list: HashMap<usize, HashSet<usize>> = HashMap::from_iter(vec![
+        let expected_adjacency_list: AdjacencyList = HashMap::from_iter(vec![
             (0, HashSet::from_iter(vec![1])),
             (1, HashSet::from_iter(vec![0, 2])),
             (2, HashSet::from_iter(vec![1, 3])),
@@ -2685,9 +2883,9 @@ mod test {
             },
         ];
 
-        let (_, dcel) = path_to_graph(&[curve]);
+        let faces = path_to_graph(&[curve]);
 
-        assert!(dcel.faces().is_empty());
+        assert!(faces.is_empty());
     }
 
     #[test]
@@ -2873,9 +3071,6 @@ mod test {
         let mut intersections_vec = find_interesctions(&segments, true);
 
         for intersection in &intersections_vec {
-            if intersection.intersecting_segment_indices.is_empty() {
-                println!("Empty: {intersection:?}");
-            }
             assert!(!intersection.intersecting_segment_indices.is_empty());
         }
 
@@ -3236,5 +3431,72 @@ mod test {
                 },
             ));
         }
+    }
+
+    #[test]
+    fn simple_degenerate_point_correcting() {
+        let face = vec![
+            Point::new(362.75317, 138.70242),
+            Point::new(368.2237, 158.12653),
+            Point::new(350.72037, 163.93617),
+            Point::new(346.73752, 147.39384),
+            Point::new(345.7601, 145.33516),
+            Point::new(353.23737, 142.41664),
+            Point::new(356.65186, 150.63629),
+            Point::new(353.23737, 142.41664),
+        ];
+
+        let new_faces = correct_face_with_degenerate_points(face);
+        assert_eq!(new_faces.len(), 2);
+    }
+
+    #[test]
+    fn complex_degenerate_point_correcting() {
+        let face = vec![
+            Point::new(122.73693, 142.97884),
+            Point::new(134.47775, 150.8719),
+            Point::new(137.1224, 152.64983),
+            Point::new(146.1432, 159.88219),
+            Point::new(147.78151, 146.4958),
+            Point::new(149.52223, 142.25769),
+            Point::new(155.51039, 127.67841),
+            Point::new(155.08409, 127.0715),
+            Point::new(150.10312, 117.55582),
+            Point::new(147.04967, 111.72247),
+            Point::new(150.10312, 117.55582),
+            Point::new(154.81042, 108.40404),
+            Point::new(144.70998, 95.5031),
+            Point::new(139.94247, 101.33901),
+            Point::new(140.4403, 102.07162),
+            Point::new(144.80272, 124.08911),
+            Point::new(140.4403, 102.07162),
+            Point::new(139.94247, 101.33901),
+            Point::new(132.1, 112.22),
+            Point::new(139.73, 124.84),
+            Point::new(136.469, 140.9366),
+            Point::new(139.73, 124.84),
+            Point::new(132.1, 112.22),
+            Point::new(126.36971, 120.84164),
+            Point::new(131.39497, 139.17522),
+            Point::new(126.36971, 120.84164),
+            Point::new(122.59472, 131.74731),
+            Point::new(121.36434, 136.55379),
+        ];
+
+        let new_faces = correct_face_with_degenerate_points(face);
+        assert_eq!(new_faces.len(), 6);
+    }
+
+    #[test]
+    fn correcting_degenerate_points_does_nothing_with_no_degenerate_points() {
+        let face = vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(1.0, 1.0),
+            Point::new(0.0, 1.0),
+        ];
+
+        let new_faces = correct_face_with_degenerate_points(face);
+        assert_eq!(new_faces.len(), 1);
     }
 }

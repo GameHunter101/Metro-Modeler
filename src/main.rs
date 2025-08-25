@@ -122,21 +122,23 @@ async fn main() {
 
     println!("{}", start_time.elapsed().as_millis() as f32 / 1000.0);
 
-    // let all_curves: Vec<HermiteCurve> = major_network_curves.into_iter().chain(minor_network_curves).collect();
     dbg!(
         major_network_curves.iter().flatten().count(),
         minor_network_curves.iter().flatten().count()
     );
 
-    let all_curves: Vec<HermiteCurve> = minor_network_curves.into_iter().chain(major_network_curves).collect();
+    let all_curves: Vec<HermiteCurve> = minor_network_curves
+        .into_iter()
+        .chain(major_network_curves)
+        .collect();
 
-    let (verts, major_network_dcel) = path_to_graph(&all_curves);
+    let faces = path_to_graph(&all_curves);
 
-    for face in major_network_dcel.faces() {
+    for face in faces {
         println!(
             "polygon({:?})",
             face.iter()
-                .map(|&vert_idx| (verts[vert_idx].x, verts[vert_idx].y))
+                .map(|vertex| (vertex.x, vertex.y))
                 .collect::<Vec<_>>()
         );
     }
