@@ -930,22 +930,26 @@ fn correct_face_with_degenerate_points(face: Vec<Point>) -> Vec<Vec<Point>> {
 
     // Correct indices after skipping duplicates
     for neighbors in adjacency_list.values_mut() {
-        for neighbor_index in neighbors.clone() {
-            let index_to_replace_with = if skipped_original_indices.contains(&neighbor_index) {
-                let truncated_pos = truncate_point_to_decimal_place(face[neighbor_index], 3);
-                vertex_pos_to_index[&(OrderedFloat(truncated_pos.x), OrderedFloat(truncated_pos.y))]
-            } else {
-                let offset = skipped_original_indices
-                    .iter()
-                    .map(|skipped_index| (neighbor_index > *skipped_index) as usize)
-                    .sum::<usize>();
+        let offset_neighbors: HashSet<usize> = neighbors
+            .clone()
+            .into_iter()
+            .map(|neighbor_index| {
+                if skipped_original_indices.contains(&neighbor_index) {
+                    let truncated_pos = truncate_point_to_decimal_place(face[neighbor_index], 3);
+                    vertex_pos_to_index
+                        [&(OrderedFloat(truncated_pos.x), OrderedFloat(truncated_pos.y))]
+                } else {
+                    let offset = skipped_original_indices
+                        .iter()
+                        .map(|skipped_index| (neighbor_index > *skipped_index) as usize)
+                        .sum::<usize>();
 
-                neighbor_index - offset
-            };
+                    neighbor_index - offset
+                }
+            })
+            .collect();
 
-            neighbors.remove(&neighbor_index);
-            neighbors.insert(index_to_replace_with);
-        }
+        *neighbors = offset_neighbors;
     }
 
     let mut degenerate_points_indices: Vec<usize> = (0..full_face.len())
@@ -960,8 +964,8 @@ fn correct_face_with_degenerate_points(face: Vec<Point>) -> Vec<Vec<Point>> {
 
     for degenerate_point_index in degenerate_points_indices {
         let degenerate_point = full_face[degenerate_point_index];
-        let degenerate_previous_point =
-            full_face[(degenerate_point_index as i32 - 1).rem_euclid(full_face.len() as i32) as usize];
+        let degenerate_previous_point = full_face
+            [(degenerate_point_index as i32 - 1).rem_euclid(full_face.len() as i32) as usize];
 
         let all_segments_by_indices: HashSet<(usize, usize)> =
             HashSet::from_iter(adjacency_list.iter().flat_map(
@@ -1003,37 +1007,33 @@ fn correct_face_with_degenerate_points(face: Vec<Point>) -> Vec<Vec<Point>> {
                 .total_cmp(&(degenerate_point - b.0).norm_squared())
         });
 
-        let mut new_segment_origin_index = degenerate_point_index;
+        let (raycast_intersection, intersecting_segment_index) = raycast_points[0];
 
-        for (raycast_intersection, intersecting_segment_index) in raycast_points {
-            let new_point_index = full_face.len();
-            let (left_intersection_index, right_intersection_index) =
-                segment_indices[intersecting_segment_index];
+        let new_point_index = full_face.len();
+        let (left_intersection_index, right_intersection_index) =
+            segment_indices[intersecting_segment_index];
 
-            adjacency_list.insert(
-                new_point_index,
-                HashSet::from_iter(vec![
-                    new_segment_origin_index,
-                    left_intersection_index,
-                    right_intersection_index,
-                ]),
-            );
+        adjacency_list.insert(
+            new_point_index,
+            HashSet::from_iter(vec![
+                degenerate_point_index,
+                left_intersection_index,
+                right_intersection_index,
+            ]),
+        );
 
-            let left_intersection_set = adjacency_list.get_mut(&left_intersection_index).unwrap();
-            left_intersection_set.insert(new_point_index);
-            left_intersection_set.remove(&right_intersection_index);
-            let right_intersection_set = adjacency_list.get_mut(&right_intersection_index).unwrap();
-            right_intersection_set.insert(new_point_index);
-            right_intersection_set.remove(&left_intersection_index);
+        let left_intersection_set = adjacency_list.get_mut(&left_intersection_index).unwrap();
+        left_intersection_set.insert(new_point_index);
+        left_intersection_set.remove(&right_intersection_index);
+        let right_intersection_set = adjacency_list.get_mut(&right_intersection_index).unwrap();
+        right_intersection_set.insert(new_point_index);
+        right_intersection_set.remove(&left_intersection_index);
 
-            full_face.push(raycast_intersection);
-            adjacency_list
-                .get_mut(&new_segment_origin_index)
-                .unwrap()
-                .insert(new_point_index);
-
-            new_segment_origin_index = new_point_index;
-        }
+        full_face.push(raycast_intersection);
+        adjacency_list
+            .get_mut(&degenerate_point_index)
+            .unwrap()
+            .insert(new_point_index);
     }
 
     let dcel = DCEL::new(&full_face, adjacency_list);
@@ -3484,7 +3484,7 @@ mod test {
         ];
 
         let new_faces = correct_face_with_degenerate_points(face);
-        assert_eq!(new_faces.len(), 6);
+        assert_eq!(new_faces.len(), 5);
     }
 
     #[test]
@@ -3498,5 +3498,31 @@ mod test {
 
         let new_faces = correct_face_with_degenerate_points(face);
         assert_eq!(new_faces.len(), 1);
+    }
+
+    #[test]
+    fn complex_degenerate_point_correcting_2() {
+        let face = vec![
+            Point::new(130.96721, 461.45615),
+            Point::new(127.33398, 466.07977),
+            Point::new(122.0, 472.7),
+            Point::new(121.0, 472.0),
+            Point::new(122.0, 472.7),
+            Point::new(118.60097, 477.02026),
+            Point::new(111.84598, 485.06326),
+            Point::new(97.96574, 473.41333),
+            Point::new(107.057, 462.62),
+            Point::new(115.70953, 469.96353),
+            Point::new(107.057, 462.62),
+            Point::new(111.16254, 457.72546),
+            Point::new(122.05724, 466.8328),
+            Point::new(111.16254, 457.72546),
+            Point::new(116.853, 450.943),
+            Point::new(121.62813, 454.95776),
+        ];
+
+        let new_faces = correct_face_with_degenerate_points(face);
+
+        assert_eq!(new_faces.len(), 4);
     }
 }
