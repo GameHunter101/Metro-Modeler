@@ -805,6 +805,13 @@ pub fn path_to_graph(paths: &[HermiteCurve]) -> Vec<Vec<Point>> {
                     .map(|index| vertices[*index])
                     .collect(),
             )
+        }).flat_map(|face| {
+            let merged_face = merge_near_points(face, 1.0);
+            if merged_face.len() > 2 {
+                Some(merged_face)
+            } else {
+                None
+            }
         })
         .collect();
 
@@ -1083,6 +1090,59 @@ fn raycast_through_segments(
         .collect()
 }
 
+fn merge_near_points(verts: Vec<Point>, merge_distance: f32) -> Vec<Point> {
+    let merge_distance_squared = merge_distance * merge_distance;
+    let start_index = get_index_of_next_far_point(&verts, merge_distance_squared, 0);
+
+    if start_index == 0 {
+        return vec![verts[0]];
+    }
+
+    let mut merged_verts = Vec::new();
+
+    let mut group_start_index = start_index;
+    loop {
+        let group_end_index =
+            get_index_of_next_far_point(&verts, merge_distance_squared, group_start_index);
+
+        if group_end_index == group_start_index + 1 {
+            merged_verts.push(verts[group_start_index]);
+        } else {
+            let count = if group_end_index > group_start_index {
+                group_end_index - group_start_index
+            } else {
+                verts.len() - group_start_index + group_end_index
+            };
+            let merged_center = (group_start_index..(group_start_index + count))
+                .fold(Point::zeros(), |acc, idx| acc + verts[idx % verts.len()])
+                / count as f32;
+            merged_verts.push(merged_center);
+        }
+
+        if group_end_index == start_index {
+            break;
+        }
+
+        group_start_index = group_end_index;
+    }
+
+    merged_verts
+}
+
+fn get_index_of_next_far_point(
+    verts: &[Point],
+    merge_distance_squared: f32,
+    start_index: usize,
+) -> usize {
+    let mut far_index = (start_index + 1) % verts.len();
+    while far_index != start_index
+        && (verts[far_index] - verts[start_index]).norm_squared() <= merge_distance_squared
+    {
+        far_index = (far_index + 1) % verts.len();
+    }
+    far_index
+}
+
 #[cfg(test)]
 mod test {
     use cool_utils::data_structures::dcel::DCEL;
@@ -1104,8 +1164,9 @@ mod test {
 
     use super::{
         EventPoint, EventPointType, Segment, SkipList, calc_intersection_point,
-        correct_face_with_degenerate_points, find_interesctions, segments_to_adjacency_list,
-        split_segments_at_intersections, update_status, vertices_to_adjacency_list,
+        correct_face_with_degenerate_points, find_interesctions, merge_near_points,
+        segments_to_adjacency_list, split_segments_at_intersections, update_status,
+        vertices_to_adjacency_list,
     };
 
     fn same_intersecting_segments(test: Vec<usize>, expected: Vec<usize>) -> bool {
@@ -3501,6 +3562,46 @@ mod test {
     }
 
     #[test]
+    fn weird_degenerate_point_correction_edge_case() {
+        let face = vec![
+            Point::new(369.94003, 245.65565),
+            Point::new(385.5139, 249.89523),
+            Point::new(380.55273, 260.10782),
+            Point::new(385.5139, 249.89523),
+            Point::new(398.3972, 255.00291),
+            Point::new(402.94324, 256.80524),
+            Point::new(386.14407, 266.2215),
+            Point::new(402.94324, 256.80524),
+            Point::new(403.92545, 257.19464),
+            Point::new(404.0795, 266.4047),
+            Point::new(404.25604, 276.96054),
+            Point::new(404.2073, 277.46613),
+            Point::new(403.9931, 277.4457),
+            Point::new(384.84143, 275.11737),
+            Point::new(384.604, 266.22),
+            Point::new(375.81036, 261.73547),
+            Point::new(366.624, 257.134),
+        ];
+
+        let new_faces = correct_face_with_degenerate_points(face);
+
+        assert_eq!(new_faces.len(), 3);
+
+        let count_of_faces_with_inside_corner = new_faces
+            .iter()
+            .filter(|face| {
+                face.iter()
+                    .any(|vert| points_are_close(*vert, Point::new(402.94324, 256.80524)))
+                    && face
+                        .iter()
+                        .any(|vert| points_are_close(*vert, Point::new(384.604, 266.22)))
+            })
+            .count();
+
+        assert_eq!(count_of_faces_with_inside_corner, 1);
+    }
+
+    #[test]
     fn complex_degenerate_point_correcting_2() {
         let face = vec![
             Point::new(130.96721, 461.45615),
@@ -3524,5 +3625,54 @@ mod test {
         let new_faces = correct_face_with_degenerate_points(face);
 
         assert_eq!(new_faces.len(), 4);
+    }
+
+    #[test]
+    fn simple_point_merge_with_overlapping_points() {
+        let points = vec![Point::zeros(); 4];
+        let merged_points = merge_near_points(points, 0.001);
+
+        assert_eq!(merged_points, vec![Point::zeros()]);
+    }
+
+    #[test]
+    fn simple_point_merge_with_overlapping_points_with_discontinuity() {
+        let points = vec![
+            Point::zeros(),
+            Point::zeros(),
+            Point::new(2.0, 2.0),
+            Point::new(0.0, 2.0),
+            Point::new(0.0, 2.0),
+        ];
+        let merged_points = merge_near_points(points, 0.001);
+
+        assert_eq!(
+            merged_points,
+            vec![Point::new(2.0, 2.0), Point::new(0.0, 2.0), Point::zeros()]
+        );
+    }
+
+    #[test]
+    fn complex_point_merge_with_overlapping_points_with_discontinuity() {
+        let points = vec![
+            Point::zeros(),
+            Point::new(0.0005, 0.0001),
+            Point::new(2.0, 2.0),
+            Point::new(0.0, 2.0),
+            Point::new(-0.001, 2.0),
+        ];
+        let merged_points = merge_near_points(points, 0.001);
+
+        let expected_points = vec![
+            Point::new(2.0, 2.0),
+            Point::new(-0.0005, 2.0),
+            Point::new(0.0025, 0.00005),
+        ];
+
+        assert_eq!(merged_points.len(), expected_points.len());
+
+        for (i, point) in expected_points.into_iter().enumerate() {
+            assert!(points_are_close(merged_points[i], point));
+        }
     }
 }
