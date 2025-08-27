@@ -583,17 +583,15 @@ fn update_status_with_end_point(
 }
 
 fn calc_intersection_point(segment_0: Segment, segment_1: Segment) -> Option<Point> {
-    let cross = |p_0: Point, p_1: Point| p_0.x * p_1.y - p_0.y * p_1.x;
-
     let p = segment_0[0];
     let q = segment_1[0];
     let r = segment_0[1];
     let s = segment_1[1];
 
-    let denominator = cross(s - q, r - p);
+    let denominator = cross_2d(s - q, r - p);
 
-    let u = cross(p - q, s - q) / denominator;
-    let t = cross(p - q, r - p) / denominator;
+    let u = cross_2d(p - q, s - q) / denominator;
+    let t = cross_2d(p - q, r - p) / denominator;
     if (u >= 0.0 && u <= 1.0) && (t >= 0.0 && t <= 1.0) {
         Some(p + u * (r - p))
     } else {
@@ -601,15 +599,17 @@ fn calc_intersection_point(segment_0: Segment, segment_1: Segment) -> Option<Poi
     }
 }
 
-fn calc_intersection_point_unbounded(segment_0: Segment, segment_1: Segment) -> Point {
-    let cross = |p_0: Point, p_1: Point| p_0.x * p_1.y - p_0.y * p_1.x;
+fn cross_2d(p_0: Point, p_1: Point) -> f32 {
+    p_0.x * p_1.y - p_0.y * p_1.x
+}
 
+fn calc_intersection_point_unbounded(segment_0: Segment, segment_1: Segment) -> Point {
     let p = segment_0[0];
     let q = segment_1[0];
     let r = segment_0[1];
     let s = segment_1[1];
 
-    let denominator = cross(s - q, r - p);
+    let denominator = cross_2d(s - q, r - p);
     if denominator == 0.0 {
         if segment_0[1] == segment_1[0] {
             segment_0[1]
@@ -617,7 +617,7 @@ fn calc_intersection_point_unbounded(segment_0: Segment, segment_1: Segment) -> 
             segment_0[0]
         }
     } else {
-        let u = cross(p - q, s - q) / denominator;
+        let u = cross_2d(p - q, s - q) / denominator;
         p + u * (r - p)
     }
 }
@@ -793,19 +793,20 @@ pub fn path_to_graph(paths: &[HermiteCurve]) -> Vec<Vec<Point>> {
 
     let (vertices, adjacency_list) = segments_to_adjacency_list(&mut segments);
 
-    let dcel = DCEL::new(&vertices, adjacency_list);
+    let dcel = DCEL::new(&vertices, &adjacency_list);
 
     let new_faces = dcel
         .faces()
         .iter()
         .flat_map(|face_from_indices| {
-            correct_face_with_degenerate_points(
+            process_raw_block_verts(
                 face_from_indices
                     .iter()
                     .map(|index| vertices[*index])
                     .collect(),
             )
-        }).flat_map(|face| {
+        })
+        .flat_map(|face| {
             let merged_face = merge_near_points(face, 1.0);
             if merged_face.len() > 2 {
                 Some(merged_face)
@@ -898,7 +899,26 @@ fn segments_to_adjacency_list(segments: &mut [Segment]) -> (Vec<Point>, Adjacenc
     vertices_to_adjacency_list(intersections_vec, &all_segments)
 }
 
-fn correct_face_with_degenerate_points(face: Vec<Point>) -> Vec<Vec<Point>> {
+fn process_raw_block_verts(face: Vec<Point>) -> Vec<Vec<Point>> {
+    let (mut full_face, mut adjacency_list) = verts_to_adjacency_list(&face);
+
+    let corrected_faces = correct_face_with_degenerate_points(&mut full_face, &mut adjacency_list);
+
+    let (flattened_faces, _adjacency_lists): (Vec<Vec<Point>>, Vec<AdjacencyList>) = corrected_faces
+        .into_iter()
+        .map(|face| {
+            let (face, mut face_adjacency_list) = verts_to_adjacency_list(&face);
+            (
+                flatten_face(face, &mut face_adjacency_list),
+                face_adjacency_list,
+            )
+        })
+        .collect();
+
+    flattened_faces
+}
+
+fn verts_to_adjacency_list(face: &[Point]) -> (Vec<Point>, AdjacencyList) {
     let mut full_face = Vec::new();
 
     let mut vertex_pos_to_index: HashMap<(OrderedFloat<f32>, OrderedFloat<f32>), usize> =
@@ -959,6 +979,13 @@ fn correct_face_with_degenerate_points(face: Vec<Point>) -> Vec<Vec<Point>> {
         *neighbors = offset_neighbors;
     }
 
+    (full_face, adjacency_list)
+}
+
+fn correct_face_with_degenerate_points(
+    full_face: &mut Vec<Point>,
+    adjacency_list: &mut AdjacencyList,
+) -> Vec<Vec<Point>> {
     let mut degenerate_points_indices: Vec<usize> = (0..full_face.len())
         .filter(|i| adjacency_list[i].len() == 1)
         .collect();
@@ -1090,6 +1117,39 @@ fn raycast_through_segments(
         .collect()
 }
 
+fn flatten_face(face: Vec<Point>, adjacency_list: &mut AdjacencyList) -> Vec<Point> {
+    if face.len() == 3 {
+        return face;
+    }
+    let mut flattened_face = Vec::new();
+    for (vert_index, vert) in face.iter().enumerate() {
+        let neighbors = &adjacency_list[&vert_index];
+        if neighbors.len() != 2 {
+            flattened_face.push(*vert);
+            continue;
+        }
+
+        let neighbors: Vec<usize> = neighbors.iter().copied().collect();
+
+        let v_0 = (vert - face[neighbors[0]]).normalize();
+        let v_1 = (vert - face[neighbors[1]]).normalize();
+
+        if v_0.dot(&v_1).abs() > 0.95 {
+            let neighbor_0_neighbors = adjacency_list.get_mut(&neighbors[0]).unwrap();
+            neighbor_0_neighbors.remove(&vert_index);
+            neighbor_0_neighbors.insert(neighbors[1]);
+
+            let neighbor_1_neighbors = adjacency_list.get_mut(&neighbors[0]).unwrap();
+            neighbor_1_neighbors.remove(&vert_index);
+            neighbor_1_neighbors.insert(neighbors[0]);
+        } else {
+            flattened_face.push(*vert);
+        }
+    }
+
+    flattened_face
+}
+
 fn merge_near_points(verts: Vec<Point>, merge_distance: f32) -> Vec<Point> {
     let merge_distance_squared = merge_distance * merge_distance;
     let start_index = get_index_of_next_far_point(&verts, merge_distance_squared, 0);
@@ -1151,7 +1211,7 @@ mod test {
     use crate::{
         street_graph::{
             AdjacencyList, calc_intersection_point_unbounded, path_to_graph, points_are_close,
-            segment_end, segment_start, sort_joint_segments,
+            segment_end, segment_start, sort_joint_segments, verts_to_adjacency_list,
         },
         street_plan::ControlPoint,
     };
@@ -3394,7 +3454,7 @@ mod test {
         ];
 
         let (vertices, adjacency_list) = segments_to_adjacency_list(&mut segments);
-        let dcel = DCEL::new(&vertices, adjacency_list);
+        let dcel = DCEL::new(&vertices, &adjacency_list);
 
         assert_eq!(dcel.faces().len(), 5);
     }
@@ -3507,7 +3567,9 @@ mod test {
             Point::new(353.23737, 142.41664),
         ];
 
-        let new_faces = correct_face_with_degenerate_points(face);
+        let (mut full_face, mut adjacency_list) = verts_to_adjacency_list(&face);
+
+        let new_faces = correct_face_with_degenerate_points(&mut full_face, &mut adjacency_list);
         assert_eq!(new_faces.len(), 2);
     }
 
@@ -3544,7 +3606,9 @@ mod test {
             Point::new(121.36434, 136.55379),
         ];
 
-        let new_faces = correct_face_with_degenerate_points(face);
+        let (mut full_face, mut adjacency_list) = verts_to_adjacency_list(&face);
+
+        let new_faces = correct_face_with_degenerate_points(&mut full_face, &mut adjacency_list);
         assert_eq!(new_faces.len(), 5);
     }
 
@@ -3557,7 +3621,9 @@ mod test {
             Point::new(0.0, 1.0),
         ];
 
-        let new_faces = correct_face_with_degenerate_points(face);
+        let (mut full_face, mut adjacency_list) = verts_to_adjacency_list(&face);
+
+        let new_faces = correct_face_with_degenerate_points(&mut full_face, &mut adjacency_list);
         assert_eq!(new_faces.len(), 1);
     }
 
@@ -3583,7 +3649,9 @@ mod test {
             Point::new(366.624, 257.134),
         ];
 
-        let new_faces = correct_face_with_degenerate_points(face);
+        let (mut full_face, mut adjacency_list) = verts_to_adjacency_list(&face);
+
+        let new_faces = correct_face_with_degenerate_points(&mut full_face, &mut adjacency_list);
 
         assert_eq!(new_faces.len(), 3);
 
@@ -3622,7 +3690,9 @@ mod test {
             Point::new(121.62813, 454.95776),
         ];
 
-        let new_faces = correct_face_with_degenerate_points(face);
+        let (mut full_face, mut adjacency_list) = verts_to_adjacency_list(&face);
+
+        let new_faces = correct_face_with_degenerate_points(&mut full_face, &mut adjacency_list);
 
         assert_eq!(new_faces.len(), 4);
     }
