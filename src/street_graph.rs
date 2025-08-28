@@ -629,6 +629,69 @@ pub fn points_are_close(p_1: Point, p_2: Point) -> bool {
     (p_1 - p_2).norm_squared() < 0.0001
 }
 
+pub fn path_to_graph(paths: &[HermiteCurve]) -> Vec<Vec<Point>> {
+    let all_segment_points = paths.iter().map(|curve| {
+        curve
+            .into_iter()
+            .map(|pos| pos.position)
+            .collect::<Vec<_>>()
+    });
+
+    let mut segments: Vec<[Point; 2]> = all_segment_points
+        .flat_map(|curve| {
+            curve[..curve.len() - 1]
+                .into_iter()
+                .enumerate()
+                .map(|(i, point)| [*point, curve[i + 1]])
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    let (mut vertices, adjacency_list) = segments_to_adjacency_list(&mut segments);
+
+    flatten_graph(&mut vertices, &adjacency_list, 0.95);
+
+    let dcel = DCEL::new(&vertices, &adjacency_list);
+
+    let new_faces = dcel
+        .faces()
+        .iter()
+        .flat_map(|face_from_indices| {
+            process_raw_block_verts(
+                face_from_indices
+                    .iter()
+                    .map(|index| vertices[*index])
+                    .collect(),
+            )
+        })
+        .flat_map(|face| {
+            let merged_face = merge_near_points(face, 1.0);
+            if merged_face.len() > 2 {
+                Some(merged_face)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    new_faces
+}
+
+type AdjacencyList = HashMap<usize, HashSet<usize>>;
+
+fn segments_to_adjacency_list(segments: &mut [Segment]) -> (Vec<Point>, AdjacencyList) {
+    let intersections: HashSet<IntersectionPoint> =
+        HashSet::from_iter(find_interesctions(&segments, true));
+
+    let mut intersections_vec: Vec<IntersectionPoint> = intersections.iter().cloned().collect();
+
+    let new_segments = split_segments_at_intersections(&mut intersections_vec, segments);
+
+    let all_segments: Vec<Segment> = segments.to_vec().into_iter().chain(new_segments).collect();
+
+    vertices_to_adjacency_list(intersections_vec, &all_segments)
+}
+
 pub fn split_segments_at_intersections(
     all_intersections: &mut [IntersectionPoint],
     segments: &mut [Segment],
@@ -745,82 +808,6 @@ pub fn split_segments_at_intersections(
     new_segments
 }
 
-fn list_segments_and_the_points_that_intersect_them(
-    intersection_points: &[IntersectionPoint],
-    segments: &[Segment],
-) -> Vec<(usize, Vec<usize>)> {
-    let mut points_on_each_segment = vec![(usize::MAX, Vec::new()); segments.len()];
-
-    for (
-        intersection_index,
-        IntersectionPoint {
-            intersecting_segment_indices,
-            position,
-        },
-    ) in intersection_points.iter().enumerate()
-    {
-        for &intersecting_segment in intersecting_segment_indices {
-            if !points_are_close(*position, segment_start(segments[intersecting_segment])) {
-                points_on_each_segment[intersecting_segment]
-                    .1
-                    .push(intersection_index);
-            } else {
-                points_on_each_segment[intersecting_segment].0 = intersection_index;
-            }
-        }
-    }
-
-    points_on_each_segment
-}
-
-pub fn path_to_graph(paths: &[HermiteCurve]) -> Vec<Vec<Point>> {
-    let all_segment_points = paths.iter().map(|curve| {
-        curve
-            .into_iter()
-            .map(|pos| pos.position)
-            .collect::<Vec<_>>()
-    });
-
-    let mut segments: Vec<[Point; 2]> = all_segment_points
-        .flat_map(|curve| {
-            curve[..curve.len() - 1]
-                .into_iter()
-                .enumerate()
-                .map(|(i, point)| [*point, curve[i + 1]])
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    let (vertices, adjacency_list) = segments_to_adjacency_list(&mut segments);
-
-    let dcel = DCEL::new(&vertices, &adjacency_list);
-
-    let new_faces = dcel
-        .faces()
-        .iter()
-        .flat_map(|face_from_indices| {
-            process_raw_block_verts(
-                face_from_indices
-                    .iter()
-                    .map(|index| vertices[*index])
-                    .collect(),
-            )
-        })
-        .flat_map(|face| {
-            let merged_face = merge_near_points(face, 1.0);
-            if merged_face.len() > 2 {
-                Some(merged_face)
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    new_faces
-}
-
-type AdjacencyList = HashMap<usize, HashSet<usize>>;
-
 fn vertices_to_adjacency_list(
     vertices: Vec<IntersectionPoint>,
     segments: &[Segment],
@@ -886,34 +873,49 @@ fn truncate_point_to_decimal_place(point: Point, decimal_places: u32) -> Point {
     Point::new(point_x / fac, point_y / fac)
 }
 
-fn segments_to_adjacency_list(segments: &mut [Segment]) -> (Vec<Point>, AdjacencyList) {
-    let intersections: HashSet<IntersectionPoint> =
-        HashSet::from_iter(find_interesctions(&segments, true));
+fn list_segments_and_the_points_that_intersect_them(
+    intersection_points: &[IntersectionPoint],
+    segments: &[Segment],
+) -> Vec<(usize, Vec<usize>)> {
+    let mut points_on_each_segment = vec![(usize::MAX, Vec::new()); segments.len()];
 
-    let mut intersections_vec: Vec<IntersectionPoint> = intersections.iter().cloned().collect();
+    for (
+        intersection_index,
+        IntersectionPoint {
+            intersecting_segment_indices,
+            position,
+        },
+    ) in intersection_points.iter().enumerate()
+    {
+        for &intersecting_segment in intersecting_segment_indices {
+            if !points_are_close(*position, segment_start(segments[intersecting_segment])) {
+                points_on_each_segment[intersecting_segment]
+                    .1
+                    .push(intersection_index);
+            } else {
+                points_on_each_segment[intersecting_segment].0 = intersection_index;
+            }
+        }
+    }
 
-    let new_segments = split_segments_at_intersections(&mut intersections_vec, segments);
-
-    let all_segments: Vec<Segment> = segments.to_vec().into_iter().chain(new_segments).collect();
-
-    vertices_to_adjacency_list(intersections_vec, &all_segments)
+    points_on_each_segment
 }
-
 fn process_raw_block_verts(face: Vec<Point>) -> Vec<Vec<Point>> {
     let (mut full_face, mut adjacency_list) = verts_to_adjacency_list(&face);
 
     let corrected_faces = correct_face_with_degenerate_points(&mut full_face, &mut adjacency_list);
 
-    let (flattened_faces, _adjacency_lists): (Vec<Vec<Point>>, Vec<AdjacencyList>) = corrected_faces
-        .into_iter()
-        .map(|face| {
-            let (face, mut face_adjacency_list) = verts_to_adjacency_list(&face);
-            (
-                flatten_face(face, &mut face_adjacency_list),
-                face_adjacency_list,
-            )
-        })
-        .collect();
+    let (flattened_faces, _adjacency_lists): (Vec<Vec<Point>>, Vec<AdjacencyList>) =
+        corrected_faces
+            .into_iter()
+            .map(|face| {
+                let (face, mut face_adjacency_list) = verts_to_adjacency_list(&face);
+                (
+                    flatten_face(face, &mut face_adjacency_list),
+                    face_adjacency_list,
+                )
+            })
+            .collect();
 
     flattened_faces
 }
@@ -1117,6 +1119,77 @@ fn raycast_through_segments(
         .collect()
 }
 
+fn flatten_graph(graph: &mut [Point], adjacency_list: &AdjacencyList, flatten_threshold: f32) {
+    for index_of_vertex in 0..graph.len() {
+        let vertex = graph[index_of_vertex];
+        let all_neighbors = Vec::from_iter(adjacency_list[&index_of_vertex].clone());
+        let mut visited_neighbors: HashSet<usize> = HashSet::new();
+
+        if all_neighbors.len() == 1 {
+            continue;
+        }
+
+        let nudge_positions: Vec<Point> = all_neighbors
+            .iter()
+            .flat_map(|neighbor_index| {
+                if visited_neighbors.contains(neighbor_index) {
+                    return None;
+                }
+
+                visited_neighbors.insert(*neighbor_index);
+
+                let neighbor = graph[*neighbor_index];
+                let v_0 = (vertex - neighbor).normalize();
+
+                let unchecked_neighbors: Vec<usize> = all_neighbors
+                    .iter()
+                    .filter(|&other_neighbor| !visited_neighbors.contains(other_neighbor))
+                    .copied()
+                    .collect();
+
+                if visited_neighbors.len() == all_neighbors.len() {
+                    return None;
+                }
+
+                let opposite_neighbor_index = unchecked_neighbors.iter().fold(
+                    unchecked_neighbors[0],
+                    |acc, other_neighbor| {
+                        let v_1 = (vertex - graph[*other_neighbor]).normalize();
+                        let v_2 = (vertex - graph[acc]).normalize();
+
+                        if v_0.dot(&v_1).abs() > v_0.dot(&v_2).abs() {
+                            *other_neighbor
+                        } else {
+                            acc
+                        }
+                    },
+                );
+
+                visited_neighbors.insert(opposite_neighbor_index);
+
+                let v_1 = (graph[opposite_neighbor_index] - vertex).normalize();
+
+                if v_0.dot(&v_1).abs() > flatten_threshold {
+                    let nudge_vector = v_1 - v_0;
+                    let nudge_position = calc_intersection_point_unbounded(
+                        [vertex, vertex + nudge_vector],
+                        [neighbor, graph[opposite_neighbor_index]],
+                    );
+
+                    Some(nudge_position)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if !nudge_positions.is_empty() {
+            graph[index_of_vertex] =
+                nudge_positions.iter().sum::<Point>() / (nudge_positions.len() as f32);
+        }
+    }
+}
+
 fn flatten_face(face: Vec<Point>, adjacency_list: &mut AdjacencyList) -> Vec<Point> {
     if face.len() == 3 {
         return face;
@@ -1224,7 +1297,7 @@ mod test {
 
     use super::{
         EventPoint, EventPointType, Segment, SkipList, calc_intersection_point,
-        correct_face_with_degenerate_points, find_interesctions, merge_near_points,
+        correct_face_with_degenerate_points, find_interesctions, flatten_graph, merge_near_points,
         segments_to_adjacency_list, split_segments_at_intersections, update_status,
         vertices_to_adjacency_list,
     };
@@ -3744,5 +3817,104 @@ mod test {
         for (i, point) in expected_points.into_iter().enumerate() {
             assert!(points_are_close(merged_points[i], point));
         }
+    }
+
+    #[test]
+    fn simple_graph_flattening_on_two_segments() {
+        let mut points = vec![
+            Point::new(250.99483, 154.48315),
+            Point::new(244.06549, 146.40572),
+            Point::new(229.00992, 136.05489),
+        ];
+
+        let adjacency_list = AdjacencyList::from_iter(vec![
+            (0, HashSet::from_iter(vec![1])),
+            (1, HashSet::from_iter(vec![0, 2])),
+            (2, HashSet::from_iter(vec![1])),
+        ]);
+
+        flatten_graph(&mut points, &adjacency_list, 0.95);
+
+        assert!(points_are_close(
+            points[0],
+            Point::new(250.99483, 154.48315)
+        ));
+
+        assert!(points_are_close(
+            points[1],
+            Point::new(242.90251, 147.69998)
+        ));
+
+        assert!(points_are_close(
+            points[2],
+            Point::new(229.00992, 136.05489)
+        ));
+    }
+
+    #[test]
+    fn graph_flattening_on_three_segments() {
+        let mut points = vec![
+            Point::new(322.98245, 177.0509),
+            Point::new(325.4309, 187.04678),
+            Point::new(330.62802, 181.3),
+            Point::new(327.48358, 206.37828),
+        ];
+
+        let adjacency_list = AdjacencyList::from_iter(vec![
+            (0, HashSet::from_iter(vec![1])),
+            (1, HashSet::from_iter(vec![0, 2, 3])),
+            (2, HashSet::from_iter(vec![1])),
+            (3, HashSet::from_iter(vec![1])),
+        ]);
+
+        flatten_graph(&mut points, &adjacency_list, 0.95);
+
+        let expected_verts = vec![
+            Point::new(322.98245, 177.0509),
+            Point::new(327.48358, 206.37828),
+            Point::new(324.54049, 187.20238),
+            Point::new(330.62802, 181.3),
+        ];
+
+        assert!(expected_verts.iter().all(|expected_vert| {
+            points
+                .iter()
+                .any(|real_vert| points_are_close(*real_vert, *expected_vert))
+        }));
+    }
+
+    #[test]
+    fn graph_flattening_on_four_segments() {
+        let mut points = vec![
+            Point::new(0.0, 0.0),
+            Point::new(0.844, 0.94),
+            Point::new(2.0, 3.0),
+            Point::new(0.4, 1.5),
+            Point::new(1.276, 0.024),
+        ];
+
+        let adjacency_list = AdjacencyList::from_iter(vec![
+            (0, HashSet::from_iter(vec![1])),
+            (1, HashSet::from_iter(vec![0, 2, 3, 4])),
+            (2, HashSet::from_iter(vec![1])),
+            (3, HashSet::from_iter(vec![1])),
+            (4, HashSet::from_iter(vec![1])),
+        ]);
+
+        flatten_graph(&mut points, &adjacency_list, 0.95);
+
+        let expected_verts = vec![
+            Point::new(0.0, 0.0),
+            Point::new(0.729657, 0.967354),
+            Point::new(2.0, 3.0),
+            Point::new(0.4, 1.5),
+            Point::new(1.276, 0.024),
+        ];
+
+        assert!(expected_verts.iter().all(|expected_vert| {
+            points
+                .iter()
+                .any(|real_vert| points_are_close(*real_vert, *expected_vert))
+        }));
     }
 }
