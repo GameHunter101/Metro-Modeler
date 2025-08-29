@@ -647,9 +647,7 @@ pub fn path_to_graph(paths: &[HermiteCurve]) -> Vec<Vec<Point>> {
         })
         .collect();
 
-    let (mut vertices, adjacency_list) = segments_to_adjacency_list(&mut segments);
-
-    flatten_graph(&mut vertices, &adjacency_list, 0.95);
+    let (vertices, adjacency_list) = segments_to_adjacency_list(&mut segments);
 
     let dcel = DCEL::new(&vertices, &adjacency_list);
 
@@ -910,8 +908,10 @@ fn process_raw_block_verts(face: Vec<Point>) -> Vec<Vec<Point>> {
             .into_iter()
             .map(|face| {
                 let (face, mut face_adjacency_list) = verts_to_adjacency_list(&face);
+                let (convex_vert_indices, _concave_vert_indices) =
+                    detect_convex_and_concave_vertices(&face);
                 (
-                    flatten_face(face, &mut face_adjacency_list),
+                    flatten_face(face, &mut face_adjacency_list, convex_vert_indices, 0.98),
                     face_adjacency_list,
                 )
             })
@@ -1119,95 +1119,55 @@ fn raycast_through_segments(
         .collect()
 }
 
-fn flatten_graph(graph: &mut [Point], adjacency_list: &AdjacencyList, flatten_threshold: f32) {
-    for index_of_vertex in 0..graph.len() {
-        let vertex = graph[index_of_vertex];
-        let all_neighbors = Vec::from_iter(adjacency_list[&index_of_vertex].clone());
-        let mut visited_neighbors: HashSet<usize> = HashSet::new();
+fn detect_convex_and_concave_vertices(face: &[Point]) -> (Vec<usize>, Vec<usize>) {
+    let mut convex_indices = Vec::new();
+    let mut concave_indices = Vec::new();
 
-        if all_neighbors.len() == 1 {
-            continue;
-        }
+    for i in 0..face.len() {
+        let p_0 = face[(i as i32 - 1).rem_euclid(face.len() as i32) as usize];
+        let p_1 = face[i];
+        let p_2 = face[(i + 1) % face.len()];
 
-        let nudge_positions: Vec<Point> = all_neighbors
-            .iter()
-            .flat_map(|neighbor_index| {
-                if visited_neighbors.contains(neighbor_index) {
-                    return None;
-                }
+        let v_0 = p_1 - p_0;
+        let v_1 = p_2 - p_1;
 
-                visited_neighbors.insert(*neighbor_index);
-
-                let neighbor = graph[*neighbor_index];
-                let v_0 = (vertex - neighbor).normalize();
-
-                let unchecked_neighbors: Vec<usize> = all_neighbors
-                    .iter()
-                    .filter(|&other_neighbor| !visited_neighbors.contains(other_neighbor))
-                    .copied()
-                    .collect();
-
-                if visited_neighbors.len() == all_neighbors.len() {
-                    return None;
-                }
-
-                let opposite_neighbor_index = unchecked_neighbors.iter().fold(
-                    unchecked_neighbors[0],
-                    |acc, other_neighbor| {
-                        let v_1 = (vertex - graph[*other_neighbor]).normalize();
-                        let v_2 = (vertex - graph[acc]).normalize();
-
-                        if v_0.dot(&v_1).abs() > v_0.dot(&v_2).abs() {
-                            *other_neighbor
-                        } else {
-                            acc
-                        }
-                    },
-                );
-
-                visited_neighbors.insert(opposite_neighbor_index);
-
-                let v_1 = (graph[opposite_neighbor_index] - vertex).normalize();
-
-                if v_0.dot(&v_1).abs() > flatten_threshold {
-                    let nudge_vector = v_1 - v_0;
-                    let nudge_position = calc_intersection_point_unbounded(
-                        [vertex, vertex + nudge_vector],
-                        [neighbor, graph[opposite_neighbor_index]],
-                    );
-
-                    Some(nudge_position)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if !nudge_positions.is_empty() {
-            graph[index_of_vertex] =
-                nudge_positions.iter().sum::<Point>() / (nudge_positions.len() as f32);
+        if cross_2d(v_0, v_1) >= 0.0 {
+            convex_indices.push(i);
+        } else {
+            concave_indices.push(i);
         }
     }
+
+    (convex_indices, concave_indices)
 }
 
-fn flatten_face(face: Vec<Point>, adjacency_list: &mut AdjacencyList) -> Vec<Point> {
+fn flatten_face(
+    face: Vec<Point>,
+    adjacency_list: &mut AdjacencyList,
+    mut convex_vertex_indices: Vec<usize>,
+    flatten_threshold: f32,
+) -> Vec<Point> {
     if face.len() == 3 {
         return face;
     }
     let mut flattened_face = Vec::new();
     for (vert_index, vert) in face.iter().enumerate() {
         let neighbors = &adjacency_list[&vert_index];
-        if neighbors.len() != 2 {
+        if neighbors.len() != 2 || convex_vertex_indices.first() != Some(&vert_index) {
             flattened_face.push(*vert);
             continue;
         }
 
-        let neighbors: Vec<usize> = neighbors.iter().copied().collect();
+        // let neighbors: Vec<usize> = neighbors.iter().copied().collect();
+        let neighbors = vec![
+            (vert_index as i32 - 1).rem_euclid(face.len() as i32) as usize,
+            (vert_index + 1) % face.len(),
+        ];
 
         let v_0 = (vert - face[neighbors[0]]).normalize();
-        let v_1 = (vert - face[neighbors[1]]).normalize();
+        let v_1 = (face[neighbors[1]] - vert).normalize();
 
-        if v_0.dot(&v_1).abs() > 0.95 {
+        if v_0.dot(&v_1).abs() > flatten_threshold {
             let neighbor_0_neighbors = adjacency_list.get_mut(&neighbors[0]).unwrap();
             neighbor_0_neighbors.remove(&vert_index);
             neighbor_0_neighbors.insert(neighbors[1]);
@@ -1218,6 +1178,7 @@ fn flatten_face(face: Vec<Point>, adjacency_list: &mut AdjacencyList) -> Vec<Poi
         } else {
             flattened_face.push(*vert);
         }
+        convex_vertex_indices.remove(0);
     }
 
     flattened_face
@@ -1297,9 +1258,9 @@ mod test {
 
     use super::{
         EventPoint, EventPointType, Segment, SkipList, calc_intersection_point,
-        correct_face_with_degenerate_points, find_interesctions, flatten_graph, merge_near_points,
-        segments_to_adjacency_list, split_segments_at_intersections, update_status,
-        vertices_to_adjacency_list,
+        correct_face_with_degenerate_points, detect_convex_and_concave_vertices,
+        find_interesctions, flatten_face, merge_near_points, segments_to_adjacency_list,
+        split_segments_at_intersections, update_status, vertices_to_adjacency_list,
     };
 
     fn same_intersecting_segments(test: Vec<usize>, expected: Vec<usize>) -> bool {
@@ -3820,101 +3781,40 @@ mod test {
     }
 
     #[test]
-    fn simple_graph_flattening_on_two_segments() {
-        let mut points = vec![
-            Point::new(250.99483, 154.48315),
-            Point::new(244.06549, 146.40572),
-            Point::new(229.00992, 136.05489),
+    fn simple_convex_point_gets_flattened() {
+        let face = vec![
+            Point::new(410.44534, 242.83728),
+            Point::new(401.74466, 240.88669),
+            Point::new(404.3799, 229.7738),
+            Point::new(413.1286, 231.04807),
+            Point::new(412.62637, 235.54596),
         ];
 
-        let adjacency_list = AdjacencyList::from_iter(vec![
-            (0, HashSet::from_iter(vec![1])),
-            (1, HashSet::from_iter(vec![0, 2])),
-            (2, HashSet::from_iter(vec![1])),
-        ]);
+        let (convex_indices, _) = detect_convex_and_concave_vertices(&face);
 
-        flatten_graph(&mut points, &adjacency_list, 0.95);
+        let (face, mut adjacency_list) = verts_to_adjacency_list(&face);
 
-        assert!(points_are_close(
-            points[0],
-            Point::new(250.99483, 154.48315)
-        ));
+        let flattened_face = flatten_face(face, &mut adjacency_list, convex_indices, 0.95);
 
-        assert!(points_are_close(
-            points[1],
-            Point::new(242.90251, 147.69998)
-        ));
-
-        assert!(points_are_close(
-            points[2],
-            Point::new(229.00992, 136.05489)
-        ));
+        assert_eq!(flattened_face.len(), 4);
     }
 
     #[test]
-    fn graph_flattening_on_three_segments() {
-        let mut points = vec![
-            Point::new(322.98245, 177.0509),
-            Point::new(325.4309, 187.04678),
-            Point::new(330.62802, 181.3),
-            Point::new(327.48358, 206.37828),
+    fn simple_concave_point_does_not_get_flattened() {
+        let points = vec![
+            Point::new(410.44534, 242.83728),
+            Point::new(412.62637, 235.54596),
+            Point::new(413.1286, 231.04807),
+            Point::new(419.4213, 231.9646),
+            Point::new(416.70108, 244.23975),
         ];
 
-        let adjacency_list = AdjacencyList::from_iter(vec![
-            (0, HashSet::from_iter(vec![1])),
-            (1, HashSet::from_iter(vec![0, 2, 3])),
-            (2, HashSet::from_iter(vec![1])),
-            (3, HashSet::from_iter(vec![1])),
-        ]);
+        let (convex_indices, _) = detect_convex_and_concave_vertices(&points);
 
-        flatten_graph(&mut points, &adjacency_list, 0.95);
+        let (face, mut adjacency_list) = verts_to_adjacency_list(&points);
 
-        let expected_verts = vec![
-            Point::new(322.98245, 177.0509),
-            Point::new(327.48358, 206.37828),
-            Point::new(324.54049, 187.20238),
-            Point::new(330.62802, 181.3),
-        ];
+        let flattened_face = flatten_face(face, &mut adjacency_list, convex_indices, 0.95);
 
-        assert!(expected_verts.iter().all(|expected_vert| {
-            points
-                .iter()
-                .any(|real_vert| points_are_close(*real_vert, *expected_vert))
-        }));
-    }
-
-    #[test]
-    fn graph_flattening_on_four_segments() {
-        let mut points = vec![
-            Point::new(0.0, 0.0),
-            Point::new(0.844, 0.94),
-            Point::new(2.0, 3.0),
-            Point::new(0.4, 1.5),
-            Point::new(1.276, 0.024),
-        ];
-
-        let adjacency_list = AdjacencyList::from_iter(vec![
-            (0, HashSet::from_iter(vec![1])),
-            (1, HashSet::from_iter(vec![0, 2, 3, 4])),
-            (2, HashSet::from_iter(vec![1])),
-            (3, HashSet::from_iter(vec![1])),
-            (4, HashSet::from_iter(vec![1])),
-        ]);
-
-        flatten_graph(&mut points, &adjacency_list, 0.95);
-
-        let expected_verts = vec![
-            Point::new(0.0, 0.0),
-            Point::new(0.729657, 0.967354),
-            Point::new(2.0, 3.0),
-            Point::new(0.4, 1.5),
-            Point::new(1.276, 0.024),
-        ];
-
-        assert!(expected_verts.iter().all(|expected_vert| {
-            points
-                .iter()
-                .any(|real_vert| points_are_close(*real_vert, *expected_vert))
-        }));
+        assert_eq!(flattened_face.len(), points.len());
     }
 }
