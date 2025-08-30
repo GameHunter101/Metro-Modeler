@@ -903,21 +903,51 @@ fn process_raw_block_verts(face: Vec<Point>) -> Vec<Vec<Point>> {
 
     let corrected_faces = correct_face_with_degenerate_points(&mut full_face, &mut adjacency_list);
 
-    let (flattened_faces, _adjacency_lists): (Vec<Vec<Point>>, Vec<AdjacencyList>) =
-        corrected_faces
-            .into_iter()
-            .map(|face| {
-                let (face, mut face_adjacency_list) = verts_to_adjacency_list(&face);
-                let (_, concave_vert_indices) =
-                    detect_convex_and_concave_vertices(&face);
-                (
-                    flatten_face(face, &mut face_adjacency_list, 0.98, 0.05, concave_vert_indices),
-                    face_adjacency_list,
-                )
-            })
-            .collect();
+    let flattened_faces_and_adjacency_lists: Vec<(Vec<Point>, AdjacencyList)> = corrected_faces
+        .into_iter()
+        .map(|face| {
+            let (face, mut face_adjacency_list) = verts_to_adjacency_list(&face);
+            let (_, concave_vert_indices) = detect_convex_and_concave_vertices(&face);
+            (
+                flatten_face(
+                    face,
+                    &mut face_adjacency_list,
+                    0.98,
+                    0.07,
+                    concave_vert_indices,
+                ),
+                face_adjacency_list,
+            )
+        })
+        .collect();
 
-    flattened_faces
+    let split_faces: Vec<Vec<Point>> = flattened_faces_and_adjacency_lists
+        .into_iter()
+        .flat_map(|(face, mut adjacency_list)| {
+            let vertices_of_new_faces = split_face_at_concave_vertices(face, &mut adjacency_list);
+            dbg!(&adjacency_list);
+            println!(
+                "Face: {:?}",
+                vertices_of_new_faces
+                    .iter()
+                    .map(|vert| (vert.x, vert.y))
+                    .collect::<Vec<_>>()
+            );
+            dbg!(&adjacency_list);
+            let all_new_faces: Vec<Vec<Point>> = DCEL::new(&vertices_of_new_faces, &adjacency_list)
+                .faces()
+                .iter()
+                .map(|face| {
+                    face.iter()
+                        .map(|vert_idx| vertices_of_new_faces[*vert_idx])
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            all_new_faces
+        })
+        .collect();
+
+    split_faces
 }
 
 fn verts_to_adjacency_list(face: &[Point]) -> (Vec<Point>, AdjacencyList) {
@@ -1155,6 +1185,8 @@ fn flatten_face(
     let original_area = face_area(&face);
     let mut flattened_face = Vec::new();
 
+    println!("Vert count: {}", face.len());
+
     for (vert_index, vert) in face.iter().enumerate() {
         let proposed_area = face_area(
             &flattened_face
@@ -1178,11 +1210,13 @@ fn flatten_face(
             continue;
         }
 
-        // let neighbors: Vec<usize> = neighbors.iter().copied().collect();
-        let neighbors = vec![
+        let neighbors = Vec::from_iter(neighbors.clone());
+        println!("Neighbors: {neighbors:?}");
+        println!("Keys: {:?}", adjacency_list.keys());
+        /* let neighbors = vec![
             (vert_index as i32 - 1).rem_euclid(face.len() as i32) as usize,
             (vert_index + 1) % face.len(),
-        ];
+        ]; */
 
         let v_0 = (vert - face[neighbors[0]]).normalize();
         let v_1 = (face[neighbors[1]] - vert).normalize();
@@ -1195,16 +1229,33 @@ fn flatten_face(
             let neighbor_1_neighbors = adjacency_list.get_mut(&neighbors[0]).unwrap();
             neighbor_1_neighbors.remove(&vert_index);
             neighbor_1_neighbors.insert(neighbors[0]);
+
+            adjacency_list.remove(&vert_index);
+
+            offset_indices_in_adjacency_list(adjacency_list, vert_index);
         } else {
             flattened_face.push(*vert);
         }
         if concave_vertex_indices.first() == Some(&vert_index) {
             concave_vertex_indices.remove(0);
         }
-
     }
 
     flattened_face
+}
+
+fn offset_indices_in_adjacency_list(
+    adjacency_list: &mut AdjacencyList,
+    index_to_offset_from: usize,
+) {
+    let indices = Vec::from_iter(adjacency_list.keys().copied());
+    for index in indices {
+        if index > index_to_offset_from {
+            let neighbors = adjacency_list.remove(&index).unwrap();
+
+            adjacency_list.insert(index - 1, neighbors);
+        }
+    }
 }
 
 fn face_area(face: &[Point]) -> f32 {
@@ -1267,6 +1318,86 @@ fn get_index_of_next_far_point(
     far_index
 }
 
+fn split_face_at_concave_vertices(
+    face: Vec<Point>,
+    adjacency_list: &mut AdjacencyList,
+) -> Vec<Point> {
+    let (_, concave_indices) = detect_convex_and_concave_vertices(&face);
+
+    let mut full_face = face.clone();
+
+    for concave_index in concave_indices {
+        let concave_vert = face[concave_index];
+
+        let prev_vert = face[(concave_index as i32 - 1).rem_euclid(face.len() as i32) as usize];
+        let next_vert = face[(concave_index + 1) % face.len()];
+
+        let v_0 = (concave_vert - prev_vert).normalize();
+        let v_1 = (next_vert - concave_vert).normalize();
+
+        let raycast_dir = v_0 - v_1;
+
+        let all_segments_by_indices: HashSet<(usize, usize)> =
+            HashSet::from_iter(adjacency_list.iter().flat_map(
+                |(vertex_index, vertex_neighbors)| {
+                    vertex_neighbors.iter().map(|neighbor_index| {
+                        (
+                            *vertex_index.min(neighbor_index),
+                            *vertex_index.max(neighbor_index),
+                        )
+                    })
+                },
+            ));
+
+        let filtered_segment_indices: Vec<(usize, usize)> = all_segments_by_indices
+            .into_iter()
+            .filter(|(p_0, p_1)| *p_0 != concave_index && *p_1 != concave_index)
+            .collect();
+
+        let filtered_segments: Vec<Segment> = filtered_segment_indices
+            .iter()
+            .map(|(p_0, p_1)| [full_face[*p_0], full_face[*p_1]])
+            .collect();
+
+        let all_raycast_points =
+            raycast_through_segments(concave_vert, raycast_dir, &filtered_segments);
+
+        let (raycast_res, intersecting_segment_index) =
+            all_raycast_points
+                .iter()
+                .fold(all_raycast_points[0], |acc, val| {
+                    if (concave_vert - val.0).norm_squared() < (concave_vert - acc.0).norm_squared()
+                    {
+                        *val
+                    } else {
+                        acc
+                    }
+                });
+
+        let (neighbor_0, neighbor_1) = filtered_segment_indices[intersecting_segment_index];
+        let new_point_index = full_face.len();
+        full_face.push(raycast_res);
+        adjacency_list.insert(
+            new_point_index,
+            HashSet::from_iter(vec![neighbor_0, neighbor_1, concave_index]),
+        );
+
+        let neighbor_0_neighbors = adjacency_list.get_mut(&neighbor_0).unwrap();
+        neighbor_0_neighbors.remove(&neighbor_1);
+        neighbor_0_neighbors.insert(new_point_index);
+        let neighbor_1_neighbors = adjacency_list.get_mut(&neighbor_1).unwrap();
+        neighbor_1_neighbors.remove(&neighbor_0);
+        neighbor_1_neighbors.insert(new_point_index);
+
+        adjacency_list
+            .get_mut(&concave_index)
+            .unwrap()
+            .insert(new_point_index);
+    }
+
+    full_face
+}
+
 #[cfg(test)]
 mod test {
     use cool_utils::data_structures::dcel::DCEL;
@@ -1274,7 +1405,9 @@ mod test {
 
     use crate::{
         street_graph::{
-            calc_intersection_point_unbounded, detect_convex_and_concave_vertices, path_to_graph, points_are_close, segment_end, segment_start, sort_joint_segments, verts_to_adjacency_list, AdjacencyList
+            AdjacencyList, calc_intersection_point_unbounded, detect_convex_and_concave_vertices,
+            path_to_graph, points_are_close, segment_end, segment_start, sort_joint_segments,
+            verts_to_adjacency_list,
         },
         street_plan::ControlPoint,
     };
@@ -1287,8 +1420,8 @@ mod test {
 
     use super::{
         EventPoint, EventPointType, Segment, SkipList, calc_intersection_point,
-        correct_face_with_degenerate_points, face_area,
-        find_interesctions, flatten_face, merge_near_points, segments_to_adjacency_list,
+        correct_face_with_degenerate_points, face_area, find_interesctions, flatten_face,
+        merge_near_points, segments_to_adjacency_list, split_face_at_concave_vertices,
         split_segments_at_intersections, update_status, vertices_to_adjacency_list,
     };
 
@@ -3842,7 +3975,7 @@ mod test {
 
         let (_, concave_indices) = detect_convex_and_concave_vertices(&face);
 
-        let flattened_face = flatten_face(face, &mut adjacency_list, 0.95, 0.05, concave_indices);
+        let flattened_face = flatten_face(face, &mut adjacency_list, 0.95, 0.07, concave_indices);
 
         assert_eq!(flattened_face.len(), 4);
     }
@@ -3860,5 +3993,93 @@ mod test {
         let area = face_area(&face);
 
         assert_eq!(area, 16.5);
+    }
+
+    #[test]
+    fn split_concave_verts_does_nothing_in_square() {
+        let face = vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(1.0, 1.0),
+            Point::new(0.0, 1.0),
+        ];
+
+        let face_len = face.len();
+
+        let (_, mut adjacency_list) = verts_to_adjacency_list(&face);
+
+        let verts_of_split_face = split_face_at_concave_vertices(face, &mut adjacency_list);
+
+        assert_eq!(verts_of_split_face.len(), face_len);
+
+        let dcel = DCEL::new(&verts_of_split_face, &mut adjacency_list);
+        let split_faces = dcel.faces();
+
+        assert_eq!(split_faces.len(), 1);
+    }
+
+    #[test]
+    fn split_simple_concave_vert() {
+        let face = vec![
+            Point::new(323.506, 379.327),
+            Point::new(316.86987, 344.72137),
+            Point::new(357.41116, 362.5557),
+            Point::new(357.68384, 372.82584),
+            Point::new(362.75, 374.91),
+            Point::new(363.703, 398.539),
+        ];
+
+        let (_, mut adjacency_list) = verts_to_adjacency_list(&face);
+
+        let verts_of_split_face = split_face_at_concave_vertices(face, &mut adjacency_list);
+
+        assert_eq!(verts_of_split_face.len(), 7);
+
+        let dcel = DCEL::new(&verts_of_split_face, &mut adjacency_list);
+        let split_faces = dcel.faces();
+
+        assert_eq!(split_faces.len(), 2);
+
+        /* for split_face_indices in split_faces {
+            println!("polygon({:?})", split_face_indices.iter().map(|&idx| (verts_of_split_face[idx].x, verts_of_split_face[idx].y)).collect::<Vec<_>>());
+        } */
+    }
+
+    #[test]
+    fn split_complex_concave_verts() {
+        let face = vec![
+            Point::new(289.807, 362.57),
+            Point::new(234.843, 336.259),
+            Point::new(234.57025, 328.7942),
+            Point::new(230.22334, 315.48608),
+            Point::new(231.44621, 306.19705),
+            Point::new(256.47138, 262.09018),
+            Point::new(259.3157, 251.57437),
+            Point::new(280.91544, 270.13336),
+            Point::new(250.09709, 325.69315),
+            Point::new(247.77228, 337.43396),
+            Point::new(288.6667, 356.9097),
+        ];
+
+        let (_, mut adjacency_list) = verts_to_adjacency_list(&face);
+
+        let verts_of_split_face = split_face_at_concave_vertices(face, &mut adjacency_list);
+
+        assert_eq!(verts_of_split_face.len(), 15);
+
+        let dcel = DCEL::new(&verts_of_split_face, &mut adjacency_list);
+        let split_faces = dcel.faces();
+
+        assert_eq!(split_faces.len(), 5);
+
+        for split_face_indices in split_faces {
+            println!(
+                "polygon({:?})",
+                split_face_indices
+                    .iter()
+                    .map(|&idx| (verts_of_split_face[idx].x, verts_of_split_face[idx].y))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 }
