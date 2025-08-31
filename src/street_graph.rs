@@ -906,17 +906,14 @@ fn process_raw_block_verts(face: Vec<Point>) -> Vec<Vec<Point>> {
     let flattened_faces_and_adjacency_lists: Vec<(Vec<Point>, AdjacencyList)> = corrected_faces
         .into_iter()
         .map(|face| {
-            let (face, mut face_adjacency_list) = verts_to_adjacency_list(&face);
+            let (face, face_adjacency_list) = verts_to_adjacency_list(&face);
             let (_, concave_vert_indices) = detect_convex_and_concave_vertices(&face);
-            (
-                flatten_face(
-                    face,
-                    &mut face_adjacency_list,
-                    0.98,
-                    0.07,
-                    concave_vert_indices,
-                ),
+            flatten_face(
+                face,
                 face_adjacency_list,
+                0.98,
+                0.07,
+                concave_vert_indices,
             )
         })
         .collect();
@@ -925,15 +922,6 @@ fn process_raw_block_verts(face: Vec<Point>) -> Vec<Vec<Point>> {
         .into_iter()
         .flat_map(|(face, mut adjacency_list)| {
             let vertices_of_new_faces = split_face_at_concave_vertices(face, &mut adjacency_list);
-            dbg!(&adjacency_list);
-            println!(
-                "Face: {:?}",
-                vertices_of_new_faces
-                    .iter()
-                    .map(|vert| (vert.x, vert.y))
-                    .collect::<Vec<_>>()
-            );
-            dbg!(&adjacency_list);
             let all_new_faces: Vec<Vec<Point>> = DCEL::new(&vertices_of_new_faces, &adjacency_list)
                 .faces()
                 .iter()
@@ -1173,19 +1161,17 @@ fn detect_convex_and_concave_vertices(face: &[Point]) -> (Vec<usize>, Vec<usize>
 
 fn flatten_face(
     face: Vec<Point>,
-    adjacency_list: &mut AdjacencyList,
+    adjacency_list: AdjacencyList,
     flatten_threshold: f32,
     area_difference_threshold: f32,
     mut concave_vertex_indices: Vec<usize>,
-) -> Vec<Point> {
+) -> (Vec<Point>, AdjacencyList) {
     if face.len() == 3 {
-        return face;
+        return (face, adjacency_list);
     }
 
     let original_area = face_area(&face);
     let mut flattened_face = Vec::new();
-
-    println!("Vert count: {}", face.len());
 
     for (vert_index, vert) in face.iter().enumerate() {
         let proposed_area = face_area(
@@ -1211,29 +1197,11 @@ fn flatten_face(
         }
 
         let neighbors = Vec::from_iter(neighbors.clone());
-        println!("Neighbors: {neighbors:?}");
-        println!("Keys: {:?}", adjacency_list.keys());
-        /* let neighbors = vec![
-            (vert_index as i32 - 1).rem_euclid(face.len() as i32) as usize,
-            (vert_index + 1) % face.len(),
-        ]; */
 
         let v_0 = (vert - face[neighbors[0]]).normalize();
         let v_1 = (face[neighbors[1]] - vert).normalize();
 
-        if v_0.dot(&v_1).abs() > flatten_threshold {
-            let neighbor_0_neighbors = adjacency_list.get_mut(&neighbors[0]).unwrap();
-            neighbor_0_neighbors.remove(&vert_index);
-            neighbor_0_neighbors.insert(neighbors[1]);
-
-            let neighbor_1_neighbors = adjacency_list.get_mut(&neighbors[0]).unwrap();
-            neighbor_1_neighbors.remove(&vert_index);
-            neighbor_1_neighbors.insert(neighbors[0]);
-
-            adjacency_list.remove(&vert_index);
-
-            offset_indices_in_adjacency_list(adjacency_list, vert_index);
-        } else {
+        if v_0.dot(&v_1).abs() <= flatten_threshold {
             flattened_face.push(*vert);
         }
         if concave_vertex_indices.first() == Some(&vert_index) {
@@ -1241,21 +1209,7 @@ fn flatten_face(
         }
     }
 
-    flattened_face
-}
-
-fn offset_indices_in_adjacency_list(
-    adjacency_list: &mut AdjacencyList,
-    index_to_offset_from: usize,
-) {
-    let indices = Vec::from_iter(adjacency_list.keys().copied());
-    for index in indices {
-        if index > index_to_offset_from {
-            let neighbors = adjacency_list.remove(&index).unwrap();
-
-            adjacency_list.insert(index - 1, neighbors);
-        }
-    }
+    verts_to_adjacency_list(&flattened_face)
 }
 
 fn face_area(face: &[Point]) -> f32 {
@@ -3952,11 +3906,11 @@ mod test {
             Point::new(412.62637, 235.54596),
         ];
 
-        let (face, mut adjacency_list) = verts_to_adjacency_list(&face);
+        let (face, adjacency_list) = verts_to_adjacency_list(&face);
 
         let (_, concave_indices) = detect_convex_and_concave_vertices(&face);
 
-        let flattened_face = flatten_face(face, &mut adjacency_list, 0.95, 0.05, concave_indices);
+        let (flattened_face, _) = flatten_face(face, adjacency_list, 0.95, 0.05, concave_indices);
 
         assert_eq!(flattened_face.len(), 4);
     }
@@ -3971,11 +3925,11 @@ mod test {
             Point::new(416.70108, 244.23975),
         ];
 
-        let (face, mut adjacency_list) = verts_to_adjacency_list(&points);
+        let (face, adjacency_list) = verts_to_adjacency_list(&points);
 
         let (_, concave_indices) = detect_convex_and_concave_vertices(&face);
 
-        let flattened_face = flatten_face(face, &mut adjacency_list, 0.95, 0.07, concave_indices);
+        let (flattened_face, _) = flatten_face(face, adjacency_list, 0.95, 0.07, concave_indices);
 
         assert_eq!(flattened_face.len(), 4);
     }

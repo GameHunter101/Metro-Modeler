@@ -305,7 +305,7 @@ impl SkipList {
         self.len
     }
 
-    pub fn iter(&self, level: usize) -> Iter {
+    pub fn iter(&self, level: usize) -> Iter<'_> {
         unsafe {
             Iter {
                 next: Some(self.nodes.as_ref()),
