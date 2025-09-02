@@ -660,6 +660,7 @@ pub fn path_to_graph(paths: &[HermiteCurve]) -> Vec<Vec<Point>> {
                     .iter()
                     .map(|index| vertices[*index])
                     .collect(),
+                10.0,
             )
         })
         .flat_map(|face| {
@@ -898,29 +899,48 @@ fn list_segments_and_the_points_that_intersect_them(
 
     points_on_each_segment
 }
-fn process_raw_block_verts(face: Vec<Point>) -> Vec<Vec<Point>> {
+
+fn process_raw_block_verts(face: Vec<Point>, min_block_area: f32) -> Vec<Vec<Point>> {
     let (mut full_face, mut adjacency_list) = verts_to_adjacency_list(&face);
 
     let corrected_faces = correct_face_with_degenerate_points(&mut full_face, &mut adjacency_list);
 
-    let flattened_faces_and_adjacency_lists: Vec<(Vec<Point>, AdjacencyList)> = corrected_faces
+    /* let scaled_faces: Vec<Vec<Point>> = corrected_faces
+        .into_iter()
+        /* .flat_map(|face| {
+            let new_face = scale_face(face, 0.9);
+            if face_area(&new_face) > min_block_area {
+                Some(new_face)
+            } else {
+                None
+            }
+        }) */
+        .map(|face| scale_face(face, 2.0))
+        .collect(); */
+
+    let flattened_faces: Vec<Vec<Point>> = corrected_faces
         .into_iter()
         .map(|face| {
             let (face, face_adjacency_list) = verts_to_adjacency_list(&face);
             let (_, concave_vert_indices) = detect_convex_and_concave_vertices(&face);
-            flatten_face(
-                face,
-                face_adjacency_list,
-                0.98,
-                0.07,
-                concave_vert_indices,
-            )
+            flatten_face(face, face_adjacency_list, 0.98, 0.07, concave_vert_indices)
         })
         .collect();
 
-    let split_faces: Vec<Vec<Point>> = flattened_faces_and_adjacency_lists
+    let scaled_faces: Vec<Vec<Point>> = flattened_faces.into_iter()
+        .flat_map(|face| {
+            let new_face = scale_face(face, 1.5);
+            if face_area(&new_face) > min_block_area {
+                Some(new_face)
+            } else {
+                None
+            }
+        }).collect();
+
+    let split_faces: Vec<Vec<Point>> = scaled_faces
         .into_iter()
-        .flat_map(|(face, mut adjacency_list)| {
+        .flat_map(|face| {
+            let (face, mut adjacency_list) = verts_to_adjacency_list(&face);
             let vertices_of_new_faces = split_face_at_concave_vertices(face, &mut adjacency_list);
             let all_new_faces: Vec<Vec<Point>> = DCEL::new(&vertices_of_new_faces, &adjacency_list)
                 .faces()
@@ -1137,6 +1157,41 @@ fn raycast_through_segments(
         .collect()
 }
 
+fn scale_face(face: Vec<Point>, translation_distance: f32) -> Vec<Point> {
+    face.iter()
+        .enumerate()
+        .map(|(vert_idx, vert)| {
+            let previous_neighbor =
+                face[(vert_idx as i32 - 1).rem_euclid(face.len() as i32) as usize];
+            let next_neighbor = face[(vert_idx + 1) % face.len()];
+
+            let v_0 = (vert - previous_neighbor).normalize();
+            let v_1 = (next_neighbor - vert).normalize();
+
+            let translation_direction_raw = v_1 - v_0;
+            let translation_direction = if translation_direction_raw == Vector2::zeros() {
+                let previous_neighbor =
+                    face[(vert_idx as i32 - 1).rem_euclid(face.len() as i32) as usize];
+                let tangent_direction_2d = (vert - previous_neighbor).normalize();
+                let tangent_direction =
+                    nalgebra::Vector3::new(tangent_direction_2d.x, tangent_direction_2d.y, 0.0);
+                let translation_direction_3d =
+                    tangent_direction.cross(&nalgebra::Vector3::z_axis());
+                Vector2::new(translation_direction_3d.x, translation_direction_3d.y)
+            } else {
+                translation_direction_raw
+            }.normalize();
+
+            let translation_direction_sign = cross_2d(v_0, v_1);
+
+            let res =
+                vert + translation_distance * translation_direction_sign * translation_direction;
+
+            res
+        })
+        .collect()
+}
+
 fn detect_convex_and_concave_vertices(face: &[Point]) -> (Vec<usize>, Vec<usize>) {
     let mut convex_indices = Vec::new();
     let mut concave_indices = Vec::new();
@@ -1165,9 +1220,9 @@ fn flatten_face(
     flatten_threshold: f32,
     area_difference_threshold: f32,
     mut concave_vertex_indices: Vec<usize>,
-) -> (Vec<Point>, AdjacencyList) {
+) -> Vec<Point> {
     if face.len() == 3 {
-        return (face, adjacency_list);
+        return face;
     }
 
     let original_area = face_area(&face);
@@ -1209,7 +1264,7 @@ fn flatten_face(
         }
     }
 
-    verts_to_adjacency_list(&flattened_face)
+    flattened_face
 }
 
 fn face_area(face: &[Point]) -> f32 {
@@ -3910,7 +3965,7 @@ mod test {
 
         let (_, concave_indices) = detect_convex_and_concave_vertices(&face);
 
-        let (flattened_face, _) = flatten_face(face, adjacency_list, 0.95, 0.05, concave_indices);
+        let flattened_face = flatten_face(face, adjacency_list, 0.95, 0.05, concave_indices);
 
         assert_eq!(flattened_face.len(), 4);
     }
@@ -3929,7 +3984,7 @@ mod test {
 
         let (_, concave_indices) = detect_convex_and_concave_vertices(&face);
 
-        let (flattened_face, _) = flatten_face(face, adjacency_list, 0.95, 0.07, concave_indices);
+        let flattened_face = flatten_face(face, adjacency_list, 0.95, 0.07, concave_indices);
 
         assert_eq!(flattened_face.len(), 4);
     }
