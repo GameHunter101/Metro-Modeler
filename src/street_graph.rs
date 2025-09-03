@@ -905,19 +905,6 @@ fn process_raw_block_verts(face: Vec<Point>, min_block_area: f32) -> Vec<Vec<Poi
 
     let corrected_faces = correct_face_with_degenerate_points(&mut full_face, &mut adjacency_list);
 
-    /* let scaled_faces: Vec<Vec<Point>> = corrected_faces
-        .into_iter()
-        /* .flat_map(|face| {
-            let new_face = scale_face(face, 0.9);
-            if face_area(&new_face) > min_block_area {
-                Some(new_face)
-            } else {
-                None
-            }
-        }) */
-        .map(|face| scale_face(face, 2.0))
-        .collect(); */
-
     let flattened_faces: Vec<Vec<Point>> = corrected_faces
         .into_iter()
         .map(|face| {
@@ -927,15 +914,17 @@ fn process_raw_block_verts(face: Vec<Point>, min_block_area: f32) -> Vec<Vec<Poi
         })
         .collect();
 
-    let scaled_faces: Vec<Vec<Point>> = flattened_faces.into_iter()
+    let scaled_faces: Vec<Vec<Point>> = flattened_faces
+        .into_iter()
         .flat_map(|face| {
-            let new_face = scale_face(face, 1.5);
+            let new_face = scale_face(face, 1.0);
             if face_area(&new_face) > min_block_area {
-                Some(new_face)
+                Some(fix_non_manifold_face(merge_near_points(new_face, 0.1)))
             } else {
                 None
             }
-        }).collect();
+        })
+        .collect();
 
     let split_faces: Vec<Vec<Point>> = scaled_faces
         .into_iter()
@@ -1158,38 +1147,56 @@ fn raycast_through_segments(
 }
 
 fn scale_face(face: Vec<Point>, translation_distance: f32) -> Vec<Point> {
-    face.iter()
+    let translated_edges: Vec<Segment> = (0..face.len())
+        .map(|i| {
+            let p_0 = face[i];
+            let p_1 = face[(i + 1) % face.len()];
+
+            let dir_to_point = p_1 - p_0;
+
+            let v_edge = Point::new(-dir_to_point.y, dir_to_point.x).normalize();
+
+            [
+                p_0 + translation_distance * v_edge,
+                p_1 + translation_distance * v_edge,
+            ]
+        })
+        .collect();
+
+    translated_edges
+        .iter()
         .enumerate()
-        .map(|(vert_idx, vert)| {
-            let previous_neighbor =
-                face[(vert_idx as i32 - 1).rem_euclid(face.len() as i32) as usize];
-            let next_neighbor = face[(vert_idx + 1) % face.len()];
-
-            let v_0 = (vert - previous_neighbor).normalize();
-            let v_1 = (next_neighbor - vert).normalize();
-
-            let translation_direction_raw = v_1 - v_0;
-            let translation_direction = if translation_direction_raw == Vector2::zeros() {
-                let previous_neighbor =
-                    face[(vert_idx as i32 - 1).rem_euclid(face.len() as i32) as usize];
-                let tangent_direction_2d = (vert - previous_neighbor).normalize();
-                let tangent_direction =
-                    nalgebra::Vector3::new(tangent_direction_2d.x, tangent_direction_2d.y, 0.0);
-                let translation_direction_3d =
-                    tangent_direction.cross(&nalgebra::Vector3::z_axis());
-                Vector2::new(translation_direction_3d.x, translation_direction_3d.y)
-            } else {
-                translation_direction_raw
-            }.normalize();
-
-            let translation_direction_sign = cross_2d(v_0, v_1);
-
-            let res =
-                vert + translation_distance * translation_direction_sign * translation_direction;
-
-            res
+        .map(|(edge_index, edge)| {
+            let next_edge = translated_edges[(edge_index + 1) % face.len()];
+            calc_intersection_point_unbounded(*edge, next_edge) /* .expect(
+            &format!(
+            "Failed on these edges: {:?}, {:?}",
+            [(edge[0].x, edge[0].y), (edge[1].x, edge[1].y)],
+            [(next_edge[0].x, next_edge[0].y), (next_edge[1].x, next_edge[1].y)]
+            ),
+            ) */
         })
         .collect()
+}
+
+fn fix_non_manifold_face(face: Vec<Point>) -> Vec<Point> {
+    let mut segments: Vec<Segment> = (0..face.len())
+        .map(|i| [face[i], face[(i + 1) % face.len()]])
+        .collect();
+    let (vertices, adjacency_list) = segments_to_adjacency_list(&mut segments);
+
+    let dcel = DCEL::new(&vertices, &adjacency_list);
+
+    dcel
+        .faces()
+        .iter()
+        .map(|face| {
+            face.iter()
+                .map(|vert_idx| vertices[*vert_idx])
+                .collect::<Vec<_>>()
+        })
+        .max_by(|a, b| face_area(a).total_cmp(&face_area(b)))
+        .unwrap()
 }
 
 fn detect_convex_and_concave_vertices(face: &[Point]) -> (Vec<usize>, Vec<usize>) {
@@ -1344,7 +1351,9 @@ fn split_face_at_concave_vertices(
         let v_0 = (concave_vert - prev_vert).normalize();
         let v_1 = (next_vert - concave_vert).normalize();
 
-        let raycast_dir = v_0 - v_1;
+        let orientation = cross_2d(v_0, v_1);
+
+        let raycast_dir = orientation * (v_1 - v_0).normalize();
 
         let all_segments_by_indices: HashSet<(usize, usize)> =
             HashSet::from_iter(adjacency_list.iter().flat_map(
@@ -1371,6 +1380,14 @@ fn split_face_at_concave_vertices(
         let all_raycast_points =
             raycast_through_segments(concave_vert, raycast_dir, &filtered_segments);
 
+        if all_raycast_points.is_empty() {
+            println!(
+                "{:?} | {:?} - Points: {:?}",
+                (concave_vert.x, concave_vert.y),
+                (raycast_dir.x, raycast_dir.y),
+                face.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>(),
+            );
+        }
         let (raycast_res, intersecting_segment_index) =
             all_raycast_points
                 .iter()
@@ -1414,9 +1431,7 @@ mod test {
 
     use crate::{
         street_graph::{
-            AdjacencyList, calc_intersection_point_unbounded, detect_convex_and_concave_vertices,
-            path_to_graph, points_are_close, segment_end, segment_start, sort_joint_segments,
-            verts_to_adjacency_list,
+            calc_intersection_point_unbounded, detect_convex_and_concave_vertices, fix_non_manifold_face, path_to_graph, points_are_close, scale_face, segment_end, segment_start, sort_joint_segments, truncate_point_to_decimal_place, verts_to_adjacency_list, AdjacencyList
         },
         street_plan::ControlPoint,
     };
@@ -4090,5 +4105,65 @@ mod test {
                     .collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    fn simple_face_scaling() {
+        let face = vec![
+            Point::new(422.8269, 412.7435),
+            Point::new(425.16428, 390.7026),
+            Point::new(432.99426, 392.63208),
+            Point::new(428.10278, 411.41693),
+            Point::new(427.89404, 413.49823),
+        ];
+
+        let scaled_face = scale_face(face, 1.2);
+
+        let expected_verts = vec![
+            Point::new(426.21255, 392.19681),
+            Point::new(431.5266, 393.50631),
+            Point::new(426.91806, 411.20459),
+            Point::new(426.82566, 412.12586),
+            Point::new(424.14152, 411.72607),
+        ];
+
+        (0..scaled_face.len())
+            .for_each(|i| assert!(points_are_close(scaled_face[i], expected_verts[i])));
+    }
+
+    #[test]
+    fn simple_non_manifold_face_is_fixed() {
+        let face = vec![
+            Point::new(391.0, 247.0),
+            Point::new(392.0, 240.0),
+            Point::new(400.5, 241.5),
+            Point::new(397.8, 253.5),
+            Point::new(399.0, 254.0),
+        ];
+
+        let fixed_face = fix_non_manifold_face(face);
+
+        let expected_face = vec![
+            Point::new(391.0, 247.0),
+            Point::new(392.0, 240.0),
+            Point::new(400.5, 241.5),
+            Point::new(397.90339, 253.04047),
+        ];
+
+        let fixed_set: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> = HashSet::from_iter(fixed_face.into_iter().map(|p| {
+            let trunc = truncate_point_to_decimal_place(p, 3);
+
+            (OrderedFloat(trunc.x), OrderedFloat(trunc.y))
+        }));
+
+        let expected_set: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> = HashSet::from_iter(expected_face.into_iter().map(|p| {
+            let trunc = truncate_point_to_decimal_place(p, 3);
+
+            (OrderedFloat(trunc.x), OrderedFloat(trunc.y))
+        }));
+
+        assert_eq!(fixed_set.len(), expected_set.len());
+
+        assert_eq!(fixed_set.difference(&expected_set).count(), 0);
     }
 }
