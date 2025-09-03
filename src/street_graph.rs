@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
+use std::iter;
 
 use cool_utils::data_structures::dcel::DCEL;
 use nalgebra::{Matrix2, Vector2};
@@ -629,7 +630,7 @@ pub fn points_are_close(p_1: Point, p_2: Point) -> bool {
     (p_1 - p_2).norm_squared() < 0.0001
 }
 
-pub fn path_to_graph(paths: &[HermiteCurve]) -> Vec<Vec<Point>> {
+pub fn path_to_graph(paths: &[HermiteCurve], min_face_area: f32) -> Vec<Vec<Point>> {
     let all_segment_points = paths.iter().map(|curve| {
         curve
             .into_iter()
@@ -651,7 +652,7 @@ pub fn path_to_graph(paths: &[HermiteCurve]) -> Vec<Vec<Point>> {
 
     let dcel = DCEL::new(&vertices, &adjacency_list);
 
-    let new_faces = dcel
+    let new_faces: Vec<Vec<Point>> = dcel
         .faces()
         .iter()
         .flat_map(|face_from_indices| {
@@ -660,7 +661,7 @@ pub fn path_to_graph(paths: &[HermiteCurve]) -> Vec<Vec<Point>> {
                     .iter()
                     .map(|index| vertices[*index])
                     .collect(),
-                10.0,
+                min_face_area,
             )
         })
         .flat_map(|face| {
@@ -674,6 +675,9 @@ pub fn path_to_graph(paths: &[HermiteCurve]) -> Vec<Vec<Point>> {
         .collect();
 
     new_faces
+        .into_iter()
+        .flat_map(|face| subdivide_face(face, min_face_area))
+        .collect()
 }
 
 type AdjacencyList = HashMap<usize, HashSet<usize>>;
@@ -1187,8 +1191,7 @@ fn fix_non_manifold_face(face: Vec<Point>) -> Vec<Point> {
 
     let dcel = DCEL::new(&vertices, &adjacency_list);
 
-    dcel
-        .faces()
+    dcel.faces()
         .iter()
         .map(|face| {
             face.iter()
@@ -1351,7 +1354,7 @@ fn split_face_at_concave_vertices(
         let v_0 = (concave_vert - prev_vert).normalize();
         let v_1 = (next_vert - concave_vert).normalize();
 
-        let orientation = cross_2d(v_0, v_1);
+        let orientation = cross_2d(v_0, v_1).signum();
 
         let raycast_dir = orientation * (v_1 - v_0).normalize();
 
@@ -1424,6 +1427,55 @@ fn split_face_at_concave_vertices(
     full_face
 }
 
+fn subdivide_face(face: Vec<Point>, min_face_area: f32) -> Vec<Vec<Point>> {
+    if face_area(&face) < min_face_area {
+        return vec![face];
+    }
+
+    let mut segment_indices: Vec<(usize, usize)> =
+        (0..face.len()).map(|i| (i, (i + 1) % face.len())).collect();
+    segment_indices.sort_by(|a, b| {
+        let a_length_squared = (face[a.1] - face[a.0]).norm_squared();
+        let b_length_squared = (face[b.1] - face[b.0]).norm_squared();
+
+        a_length_squared.total_cmp(&b_length_squared).reverse()
+    });
+
+    let (first_subdivision_segment, second_subdivision_segment) =
+        if segment_indices[0].0 < segment_indices[1].0 {
+            (segment_indices[0], segment_indices[1])
+        } else {
+            (segment_indices[1], segment_indices[0])
+        };
+
+    let first_subdivision_midpoint =
+        (face[first_subdivision_segment.0] + face[first_subdivision_segment.1]) / 2.0;
+    let second_subdivision_midpoint =
+        (face[second_subdivision_segment.0] + face[second_subdivision_segment.1]) / 2.0;
+
+    let first_face_subdivision: Vec<Point> = iter::once(first_subdivision_midpoint)
+        .chain(face[first_subdivision_segment.1..=second_subdivision_segment.0].to_vec())
+        .chain(iter::once(second_subdivision_midpoint))
+        .collect();
+
+    let second_face_subdivision: Vec<Point> = face[0..=first_subdivision_segment.0]
+        .to_vec()
+        .into_iter()
+        .chain(vec![
+            first_subdivision_midpoint,
+            second_subdivision_midpoint,
+        ])
+        .chain(face[(second_subdivision_segment.0 + 1)..face.len()].to_vec())
+        .collect();
+
+    // vec![first_face_subdivision, second_face_subdivision]
+
+    subdivide_face(first_face_subdivision, min_face_area)
+    .into_iter()
+    .chain(subdivide_face(second_face_subdivision, min_face_area))
+    .collect()
+}
+
 #[cfg(test)]
 mod test {
     use cool_utils::data_structures::dcel::DCEL;
@@ -1431,7 +1483,10 @@ mod test {
 
     use crate::{
         street_graph::{
-            calc_intersection_point_unbounded, detect_convex_and_concave_vertices, fix_non_manifold_face, path_to_graph, points_are_close, scale_face, segment_end, segment_start, sort_joint_segments, truncate_point_to_decimal_place, verts_to_adjacency_list, AdjacencyList
+            AdjacencyList, calc_intersection_point_unbounded, detect_convex_and_concave_vertices,
+            fix_non_manifold_face, path_to_graph, points_are_close, scale_face, segment_end,
+            segment_start, sort_joint_segments, subdivide_face, truncate_point_to_decimal_place,
+            verts_to_adjacency_list,
         },
         street_plan::ControlPoint,
     };
@@ -3224,7 +3279,7 @@ mod test {
             },
         ];
 
-        let faces = path_to_graph(&[curve]);
+        let faces = path_to_graph(&[curve], 10.0);
 
         assert!(faces.is_empty());
     }
@@ -4150,20 +4205,89 @@ mod test {
             Point::new(397.90339, 253.04047),
         ];
 
-        let fixed_set: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> = HashSet::from_iter(fixed_face.into_iter().map(|p| {
-            let trunc = truncate_point_to_decimal_place(p, 3);
+        let fixed_set: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> =
+            HashSet::from_iter(fixed_face.into_iter().map(|p| {
+                let trunc = truncate_point_to_decimal_place(p, 3);
 
-            (OrderedFloat(trunc.x), OrderedFloat(trunc.y))
-        }));
+                (OrderedFloat(trunc.x), OrderedFloat(trunc.y))
+            }));
 
-        let expected_set: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> = HashSet::from_iter(expected_face.into_iter().map(|p| {
-            let trunc = truncate_point_to_decimal_place(p, 3);
+        let expected_set: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> =
+            HashSet::from_iter(expected_face.into_iter().map(|p| {
+                let trunc = truncate_point_to_decimal_place(p, 3);
 
-            (OrderedFloat(trunc.x), OrderedFloat(trunc.y))
-        }));
+                (OrderedFloat(trunc.x), OrderedFloat(trunc.y))
+            }));
 
         assert_eq!(fixed_set.len(), expected_set.len());
 
         assert_eq!(fixed_set.difference(&expected_set).count(), 0);
+    }
+
+    #[test]
+    fn simple_subdivision() {
+        let face = vec![
+            Point::new(0.0, 0.0),
+            Point::new(2.0, 0.0),
+            Point::new(2.0, 1.0),
+            Point::new(0.0, 1.0),
+        ];
+
+        let subdivided_faces = subdivide_face(face, 1.5);
+
+        let expected_faces = vec![
+            vec![
+                Point::new(1.0, 1.0),
+                Point::new(0.0, 1.0),
+                Point::new(0.0, 2.0),
+                Point::new(1.0, 0.0),
+            ],
+            vec![
+                Point::new(1.0, 1.0),
+                Point::new(1.0, 0.0),
+                Point::new(2.0, 0.0),
+                Point::new(2.0, 1.0),
+            ],
+        ];
+
+        assert_eq!(subdivided_faces.len(), 2);
+
+        let subdivided_set_0: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> = HashSet::from_iter(
+            subdivided_faces[0]
+                .iter()
+                .map(|point| (OrderedFloat(point.x), OrderedFloat(point.y))),
+        );
+
+        let subdivided_set_1: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> = HashSet::from_iter(
+            subdivided_faces[1]
+                .iter()
+                .map(|point| (OrderedFloat(point.x), OrderedFloat(point.y))),
+        );
+
+        let expected_set_0: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> = HashSet::from_iter(
+            expected_faces[0]
+                .iter()
+                .map(|point| (OrderedFloat(point.x), OrderedFloat(point.y))),
+        );
+
+        let expected_set_1: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> = HashSet::from_iter(
+            expected_faces[1]
+                .iter()
+                .map(|point| (OrderedFloat(point.x), OrderedFloat(point.y))),
+        );
+
+        assert!(
+            (subdivided_set_0.len() == expected_set_0.len()
+                && subdivided_set_0.difference(&expected_set_0).count() == 0)
+                || (subdivided_set_0.len() == expected_set_1.len()
+                    && subdivided_set_0.difference(&expected_set_1).count() == 0)
+        );
+
+        assert!(
+            (subdivided_set_1.len() == expected_set_0.len()
+                && subdivided_set_1.difference(&expected_set_0).count() == 0)
+                || (subdivided_set_1.len() == expected_set_1.len()
+                    && subdivided_set_0.difference(&expected_set_1).count() == 0)
+        );
     }
 }

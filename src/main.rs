@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use image::{EncodableLayout, ImageBuffer};
 use nalgebra::Vector2;
 use rayon::prelude::*;
@@ -122,25 +124,29 @@ async fn main() {
 
     println!("{}", start_time.elapsed().as_millis() as f32 / 1000.0);
 
-    dbg!(
-        major_network_curves.iter().flatten().count(),
-        minor_network_curves.iter().flatten().count()
-    );
-
     let all_curves: Vec<HermiteCurve> = minor_network_curves
         .into_iter()
         .chain(major_network_curves)
         .collect();
 
-    let faces = path_to_graph(&all_curves);
+    let faces = path_to_graph(&all_curves, 20.0);
 
-    for face in faces {
-        println!(
-            "polygon({:?})",
-            face.iter()
-                .map(|vertex| (vertex.x, vertex.y))
-                .collect::<Vec<_>>()
-        );
+    let mut output = std::fs::File::create("./out.txt").unwrap();
+
+    dbg!(faces.len());
+    for (i, face) in faces.into_iter().enumerate() {
+        if i % 5000 == 0 {
+            output.write("\n".as_bytes()).unwrap();
+        }
+        output.write_all(
+            format!(
+                "polygon({:?}),",
+                face.iter()
+                    .map(|vertex| (vertex.x, vertex.y))
+                    .collect::<Vec<_>>()
+            )
+            .as_bytes(),
+        ).unwrap();
     }
 
     let mut engine = v4::V4::builder()
