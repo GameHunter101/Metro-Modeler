@@ -129,7 +129,7 @@ async fn main() {
         .chain(major_network_curves)
         .collect();
 
-    let faces = path_to_graph(&all_curves, 20.0);
+    let faces = path_to_graph(&all_curves, 15.0, 20.0);
 
     let mut output = std::fs::File::create("./out.txt").unwrap();
 

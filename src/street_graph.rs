@@ -630,7 +630,11 @@ pub fn points_are_close(p_1: Point, p_2: Point) -> bool {
     (p_1 - p_2).norm_squared() < 0.0001
 }
 
-pub fn path_to_graph(paths: &[HermiteCurve], min_face_area: f32) -> Vec<Vec<Point>> {
+pub fn path_to_graph(
+    paths: &[HermiteCurve],
+    min_block_area: f32,
+    min_face_area: f32,
+) -> Vec<Vec<Point>> {
     let all_segment_points = paths.iter().map(|curve| {
         curve
             .into_iter()
@@ -652,8 +656,7 @@ pub fn path_to_graph(paths: &[HermiteCurve], min_face_area: f32) -> Vec<Vec<Poin
 
     let dcel = DCEL::new(&vertices, &adjacency_list);
 
-    let new_faces: Vec<Vec<Point>> = dcel
-        .faces()
+    dcel.faces()
         .iter()
         .flat_map(|face_from_indices| {
             process_raw_block_verts(
@@ -661,6 +664,7 @@ pub fn path_to_graph(paths: &[HermiteCurve], min_face_area: f32) -> Vec<Vec<Poin
                     .iter()
                     .map(|index| vertices[*index])
                     .collect(),
+                min_block_area,
                 min_face_area,
             )
         })
@@ -672,11 +676,6 @@ pub fn path_to_graph(paths: &[HermiteCurve], min_face_area: f32) -> Vec<Vec<Poin
                 None
             }
         })
-        .collect();
-
-    new_faces
-        .into_iter()
-        .flat_map(|face| subdivide_face(face, min_face_area))
         .collect()
 }
 
@@ -904,7 +903,11 @@ fn list_segments_and_the_points_that_intersect_them(
     points_on_each_segment
 }
 
-fn process_raw_block_verts(face: Vec<Point>, min_block_area: f32) -> Vec<Vec<Point>> {
+fn process_raw_block_verts(
+    face: Vec<Point>,
+    min_block_area: f32,
+    min_face_area: f32,
+) -> Vec<Vec<Point>> {
     let (mut full_face, mut adjacency_list) = verts_to_adjacency_list(&face);
 
     let corrected_faces = correct_face_with_degenerate_points(&mut full_face, &mut adjacency_list);
@@ -934,7 +937,8 @@ fn process_raw_block_verts(face: Vec<Point>, min_block_area: f32) -> Vec<Vec<Poi
         .into_iter()
         .flat_map(|face| {
             let (face, mut adjacency_list) = verts_to_adjacency_list(&face);
-            let vertices_of_new_faces = split_face_at_concave_vertices(face, &mut adjacency_list);
+            let (vertices_of_new_faces, new_edges) =
+                split_face_at_concave_vertices(face, &mut adjacency_list);
             let all_new_faces: Vec<Vec<Point>> = DCEL::new(&vertices_of_new_faces, &adjacency_list)
                 .faces()
                 .iter()
@@ -945,7 +949,11 @@ fn process_raw_block_verts(face: Vec<Point>, min_block_area: f32) -> Vec<Vec<Poi
                 })
                 .collect();
             all_new_faces
+                .into_iter()
+                .map(|face| subdivide_face(face, min_face_area, new_edges.clone()))
+                .collect::<Vec<_>>()
         })
+        .flatten()
         .collect();
 
     split_faces
@@ -1340,10 +1348,12 @@ fn get_index_of_next_far_point(
 fn split_face_at_concave_vertices(
     face: Vec<Point>,
     adjacency_list: &mut AdjacencyList,
-) -> Vec<Point> {
+) -> (Vec<Point>, Vec<Segment>) {
     let (_, concave_indices) = detect_convex_and_concave_vertices(&face);
 
     let mut full_face = face.clone();
+
+    let mut new_segments: Vec<Segment> = Vec::new();
 
     for concave_index in concave_indices {
         let concave_vert = face[concave_index];
@@ -1383,14 +1393,6 @@ fn split_face_at_concave_vertices(
         let all_raycast_points =
             raycast_through_segments(concave_vert, raycast_dir, &filtered_segments);
 
-        if all_raycast_points.is_empty() {
-            println!(
-                "{:?} | {:?} - Points: {:?}",
-                (concave_vert.x, concave_vert.y),
-                (raycast_dir.x, raycast_dir.y),
-                face.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>(),
-            );
-        }
         let (raycast_res, intersecting_segment_index) =
             all_raycast_points
                 .iter()
@@ -1422,58 +1424,168 @@ fn split_face_at_concave_vertices(
             .get_mut(&concave_index)
             .unwrap()
             .insert(new_point_index);
+
+        new_segments.push([concave_vert, raycast_res]);
     }
 
-    full_face
+    (full_face, new_segments)
 }
 
-fn subdivide_face(face: Vec<Point>, min_face_area: f32) -> Vec<Vec<Point>> {
-    if face_area(&face) < min_face_area {
-        return vec![face];
+fn subdivide_face(
+    face: Vec<Point>,
+    min_face_area: f32,
+    inner_segments: Vec<Segment>,
+) -> Vec<Vec<Point>> {
+    let inner_segments_set: HashSet<[(OrderedFloat<f32>, OrderedFloat<f32>); 2]> =
+        HashSet::from_iter(
+            inner_segments
+                .into_iter()
+                .map(|segment| order_segment(segment)),
+        );
+
+    let outer_segments = (0..face.len())
+        .map(|i| {
+            let seg = [face[i], face[(i + 1) % face.len()]];
+            (seg, !inner_segments_set.contains(&order_segment(seg)))
+        })
+        .collect();
+    let segments = subdivide_face_helper(outer_segments, min_face_area);
+
+    segments
+        .into_iter()
+        .map(|face_segments| {
+            face_segments
+                .into_iter()
+                .map(|([p_0, _], _)| p_0)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn order_segment(segment: Segment) -> [(OrderedFloat<f32>, OrderedFloat<f32>); 2] {
+    let p_0 = truncate_point_to_decimal_place(segment_start(segment), 3);
+    let p_1 = truncate_point_to_decimal_place(segment_end(segment), 3);
+
+    [
+        (OrderedFloat(p_0.x), OrderedFloat(p_0.y)),
+        (OrderedFloat(p_1.x), OrderedFloat(p_1.y)),
+    ]
+}
+
+fn subdivide_face_helper(
+    segments: Vec<(Segment, bool)>,
+    min_face_area: f32,
+) -> Vec<Vec<(Segment, bool)>> {
+    if !segments.iter().any(|(_, is_outer)| *is_outer) {
+        return Vec::new();
     }
 
-    let mut segment_indices: Vec<(usize, usize)> =
-        (0..face.len()).map(|i| (i, (i + 1) % face.len())).collect();
-    segment_indices.sort_by(|a, b| {
-        let a_length_squared = (face[a.1] - face[a.0]).norm_squared();
-        let b_length_squared = (face[b.1] - face[b.0]).norm_squared();
+    if face_area(
+        &segments
+            .iter()
+            .map(|([p_0, _], _)| *p_0)
+            .collect::<Vec<_>>(),
+    ) < min_face_area
+    {
+        /* println!(
+                "polygon({:?})",
+                segments
+                    .iter()
+                    .flat_map(|([p_0, p_1], _)| [(p_0.x, p_0.y), (p_1.x, p_1.y)])
+                    .collect::<Vec<_>>()
+            );
+        println!("surrounding flags: {:?}", segments.iter().map(|(_, f)| *f).collect::<Vec<_>>()); */
+        return vec![segments];
+    }
 
-        a_length_squared.total_cmp(&b_length_squared).reverse()
-    });
+    let (first_subdivision_segment_index, first_subdivision_segment) = segments
+        .iter()
+        .enumerate()
+        .max_by(|(_, (a, _)), (_, (b, _))| {
+            (a[1] - a[0])
+                .norm_squared()
+                .total_cmp(&(b[1] - b[0]).norm_squared())
+        })
+        .unwrap();
+    let (second_subdivision_segment_index, second_subdivision_segment) = segments
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != first_subdivision_segment_index)
+        .max_by(|(_, (a, _)), (_, (b, _))| {
+            (a[1] - a[0])
+                .norm_squared()
+                .total_cmp(&(b[1] - b[0]).norm_squared())
+        })
+        .unwrap();
 
-    let (first_subdivision_segment, second_subdivision_segment) =
-        if segment_indices[0].0 < segment_indices[1].0 {
-            (segment_indices[0], segment_indices[1])
-        } else {
-            (segment_indices[1], segment_indices[0])
-        };
+    let (
+        (first_subdivision_segment_index, first_subdivision_segment),
+        (second_subdivision_segment_index, second_subdivision_segment),
+    ) = if first_subdivision_segment_index < second_subdivision_segment_index {
+        (
+            (first_subdivision_segment_index, first_subdivision_segment),
+            (second_subdivision_segment_index, second_subdivision_segment),
+        )
+    } else {
+        (
+            (second_subdivision_segment_index, second_subdivision_segment),
+            (first_subdivision_segment_index, first_subdivision_segment),
+        )
+    };
 
     let first_subdivision_midpoint =
-        (face[first_subdivision_segment.0] + face[first_subdivision_segment.1]) / 2.0;
+        (first_subdivision_segment.0[0] + first_subdivision_segment.0[1]) / 2.0;
     let second_subdivision_midpoint =
-        (face[second_subdivision_segment.0] + face[second_subdivision_segment.1]) / 2.0;
+        (second_subdivision_segment.0[0] + second_subdivision_segment.0[1]) / 2.0;
 
-    let first_face_subdivision: Vec<Point> = iter::once(first_subdivision_midpoint)
-        .chain(face[first_subdivision_segment.1..=second_subdivision_segment.0].to_vec())
-        .chain(iter::once(second_subdivision_midpoint))
-        .collect();
+    let first_face_subdivision: Vec<(Segment, bool)> = [
+        (
+            [second_subdivision_midpoint, first_subdivision_midpoint],
+            false,
+        ),
+        (
+            [first_subdivision_midpoint, first_subdivision_segment.0[1]],
+            first_subdivision_segment.1,
+        ),
+    ]
+    .into_iter()
+    .chain(
+        segments[(first_subdivision_segment_index + 1)..second_subdivision_segment_index].to_vec(),
+    )
+    .chain(iter::once((
+        [second_subdivision_segment.0[0], second_subdivision_midpoint],
+        second_subdivision_segment.1,
+    )))
+    .collect();
 
-    let second_face_subdivision: Vec<Point> = face[0..=first_subdivision_segment.0]
+    let second_face_subdivision: Vec<(Segment, bool)> = segments
+        [0..first_subdivision_segment_index]
         .to_vec()
         .into_iter()
-        .chain(vec![
-            first_subdivision_midpoint,
-            second_subdivision_midpoint,
+        .chain([
+            (
+                [first_subdivision_segment.0[0], first_subdivision_midpoint],
+                first_subdivision_segment.1,
+            ),
+            (
+                [first_subdivision_midpoint, second_subdivision_midpoint],
+                false,
+            ),
+            (
+                [second_subdivision_midpoint, second_subdivision_segment.0[1]],
+                second_subdivision_segment.1,
+            ),
         ])
-        .chain(face[(second_subdivision_segment.0 + 1)..face.len()].to_vec())
+        .chain(segments[(second_subdivision_segment_index + 1)..segments.len()].to_vec())
         .collect();
 
-    // vec![first_face_subdivision, second_face_subdivision]
-
-    subdivide_face(first_face_subdivision, min_face_area)
-    .into_iter()
-    .chain(subdivide_face(second_face_subdivision, min_face_area))
-    .collect()
+    subdivide_face_helper(first_face_subdivision, min_face_area)
+        .into_iter()
+        .chain(subdivide_face_helper(
+            second_face_subdivision,
+            min_face_area,
+        ))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1485,8 +1597,8 @@ mod test {
         street_graph::{
             AdjacencyList, calc_intersection_point_unbounded, detect_convex_and_concave_vertices,
             fix_non_manifold_face, path_to_graph, points_are_close, scale_face, segment_end,
-            segment_start, sort_joint_segments, subdivide_face, truncate_point_to_decimal_place,
-            verts_to_adjacency_list,
+            segment_start, sort_joint_segments, subdivide_face, subdivide_face_helper,
+            truncate_point_to_decimal_place, verts_to_adjacency_list,
         },
         street_plan::ControlPoint,
     };
@@ -3279,7 +3391,7 @@ mod test {
             },
         ];
 
-        let faces = path_to_graph(&[curve], 10.0);
+        let faces = path_to_graph(&[curve], 20.0, 10.0);
 
         assert!(faces.is_empty());
     }
@@ -4087,7 +4199,7 @@ mod test {
 
         let (_, mut adjacency_list) = verts_to_adjacency_list(&face);
 
-        let verts_of_split_face = split_face_at_concave_vertices(face, &mut adjacency_list);
+        let (verts_of_split_face, _) = split_face_at_concave_vertices(face, &mut adjacency_list);
 
         assert_eq!(verts_of_split_face.len(), face_len);
 
@@ -4110,7 +4222,7 @@ mod test {
 
         let (_, mut adjacency_list) = verts_to_adjacency_list(&face);
 
-        let verts_of_split_face = split_face_at_concave_vertices(face, &mut adjacency_list);
+        let (verts_of_split_face, _) = split_face_at_concave_vertices(face, &mut adjacency_list);
 
         assert_eq!(verts_of_split_face.len(), 7);
 
@@ -4142,7 +4254,7 @@ mod test {
 
         let (_, mut adjacency_list) = verts_to_adjacency_list(&face);
 
-        let verts_of_split_face = split_face_at_concave_vertices(face, &mut adjacency_list);
+        let (verts_of_split_face, _) = split_face_at_concave_vertices(face, &mut adjacency_list);
 
         assert_eq!(verts_of_split_face.len(), 15);
 
@@ -4233,7 +4345,7 @@ mod test {
             Point::new(0.0, 1.0),
         ];
 
-        let subdivided_faces = subdivide_face(face, 1.5);
+        let subdivided_faces = subdivide_face(face, 1.5, Vec::new());
 
         let expected_faces = vec![
             vec![
@@ -4289,5 +4401,57 @@ mod test {
                 || (subdivided_set_1.len() == expected_set_1.len()
                     && subdivided_set_0.difference(&expected_set_1).count() == 0)
         );
+    }
+
+    #[test]
+    fn intermediate_subdivision() {
+        let face = vec![
+            Point::new(6.0, 0.0),
+            Point::new(5.3, 1.4),
+            Point::new(4.6, 2.1),
+            Point::new(2.6, 2.6),
+            Point::new(0.0, 1.0),
+        ];
+
+        let outer_segments = (0..face.len())
+            .map(|i| ([face[i], face[(i + 1) % face.len()]], true))
+            .collect();
+        let subdivision = subdivide_face_helper(outer_segments, 6.7);
+
+        assert_eq!(subdivision.len(), 2);
+
+        assert_eq!(subdivision[0].len(), 3);
+        let first_face_flags: Vec<bool> = subdivision[0].iter().map(|(_, flag)| *flag).collect();
+        assert_eq!(first_face_flags, vec![false, true, true]);
+
+        assert_eq!(subdivision[1].len(), 6);
+        let second_face_flags: Vec<bool> = subdivision[1].iter().map(|(_, flag)| *flag).collect();
+        assert_eq!(second_face_flags, vec![true, true, true, true, false, true]);
+    }
+
+    #[test]
+    fn complex_subdivision() {
+        let face = vec![
+            Point::new(6.0, 0.0),
+            Point::new(5.3, 1.4),
+            Point::new(4.6, 2.1),
+            Point::new(2.6, 2.6),
+            Point::new(0.0, 1.0),
+        ];
+
+        let outer_segments = (0..face.len())
+            .map(|i| ([face[i], face[(i + 1) % face.len()]], true))
+            .collect();
+        let subdivision = subdivide_face_helper(outer_segments, 1.5);
+        assert_eq!(subdivision.len(), 9);
+        subdivision.iter().for_each(|segments| {
+            println!(
+                "polygon({:?})",
+                segments
+                    .iter()
+                    .flat_map(|([p_0, p_1], _)| [(p_0.x, p_0.y), (p_1.x, p_1.y)])
+                    .collect::<Vec<_>>()
+            )
+        });
     }
 }
