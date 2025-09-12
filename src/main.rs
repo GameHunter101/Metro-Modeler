@@ -13,6 +13,7 @@ use v4::{
 };
 use wgpu::vertex_attr_array;
 
+mod building_generation;
 mod event_queue;
 mod status;
 mod street_graph;

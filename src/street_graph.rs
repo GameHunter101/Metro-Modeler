@@ -681,7 +681,7 @@ pub fn path_to_graph(
 
 type AdjacencyList = HashMap<usize, HashSet<usize>>;
 
-fn segments_to_adjacency_list(segments: &mut [Segment]) -> (Vec<Point>, AdjacencyList) {
+pub fn segments_to_adjacency_list(segments: &mut [Segment]) -> (Vec<Point>, AdjacencyList) {
     let intersections: HashSet<IntersectionPoint> =
         HashSet::from_iter(find_interesctions(&segments, true));
 
@@ -950,7 +950,12 @@ fn process_raw_block_verts(
                 .collect();
             all_new_faces
                 .into_iter()
-                .map(|face| subdivide_face(face, min_face_area, new_edges.clone()))
+                .map(|face| {
+                    subdivide_face(face, min_face_area, new_edges.clone(), 0.8)
+                        .into_iter()
+                        .map(|face| simple_face_scale(face, 0.90))
+                        .collect::<Vec<_>>()
+                })
                 .collect::<Vec<_>>()
         })
         .flatten()
@@ -962,7 +967,7 @@ fn process_raw_block_verts(
 fn verts_to_adjacency_list(face: &[Point]) -> (Vec<Point>, AdjacencyList) {
     let mut full_face = Vec::new();
 
-    let mut vertex_pos_to_index: HashMap<(OrderedFloat<f32>, OrderedFloat<f32>), usize> =
+    let mut vertex_pos_to_index: HashMap<OrderedPoint, usize> =
         HashMap::new();
 
     let mut adjacency_list = AdjacencyList::new();
@@ -1258,7 +1263,7 @@ fn flatten_face(
         let percent_difference = (1.0 - proposed_area / original_area).abs();
 
         let final_area_threshold = if concave_vertex_indices.first() == Some(&vert_index) {
-            0.75 * area_difference_threshold
+            0.25 * area_difference_threshold
         } else {
             area_difference_threshold
         };
@@ -1435,8 +1440,9 @@ fn subdivide_face(
     face: Vec<Point>,
     min_face_area: f32,
     inner_segments: Vec<Segment>,
+    opposite_edge_sensitivity: f32,
 ) -> Vec<Vec<Point>> {
-    let inner_segments_set: HashSet<[(OrderedFloat<f32>, OrderedFloat<f32>); 2]> =
+    let inner_segments_set: HashSet<[OrderedPoint; 2]> =
         HashSet::from_iter(
             inner_segments
                 .into_iter()
@@ -1449,7 +1455,7 @@ fn subdivide_face(
             (seg, !inner_segments_set.contains(&order_segment(seg)))
         })
         .collect();
-    let segments = subdivide_face_helper(outer_segments, min_face_area);
+    let segments = subdivide_face_helper(outer_segments, min_face_area, opposite_edge_sensitivity);
 
     segments
         .into_iter()
@@ -1462,19 +1468,23 @@ fn subdivide_face(
         .collect()
 }
 
-fn order_segment(segment: Segment) -> [(OrderedFloat<f32>, OrderedFloat<f32>); 2] {
-    let p_0 = truncate_point_to_decimal_place(segment_start(segment), 3);
-    let p_1 = truncate_point_to_decimal_place(segment_end(segment), 3);
-
+pub type OrderedPoint = (OrderedFloat<f32>, OrderedFloat<f32>);
+fn order_segment(segment: Segment) -> [OrderedPoint; 2] {
     [
-        (OrderedFloat(p_0.x), OrderedFloat(p_0.y)),
-        (OrderedFloat(p_1.x), OrderedFloat(p_1.y)),
+        order_point(segment_start(segment)),
+        order_point(segment_end(segment)),
     ]
+}
+
+pub fn order_point(point: Point) -> OrderedPoint {
+    let trunc = truncate_point_to_decimal_place(point, 3);
+    (OrderedFloat(trunc.x), OrderedFloat(trunc.y))
 }
 
 fn subdivide_face_helper(
     segments: Vec<(Segment, bool)>,
     min_face_area: f32,
+    opposite_edge_sensitivity: f32,
 ) -> Vec<Vec<(Segment, bool)>> {
     if !segments.iter().any(|(_, is_outer)| *is_outer) {
         return Vec::new();
@@ -1487,18 +1497,10 @@ fn subdivide_face_helper(
             .collect::<Vec<_>>(),
     ) < min_face_area
     {
-        /* println!(
-                "polygon({:?})",
-                segments
-                    .iter()
-                    .flat_map(|([p_0, p_1], _)| [(p_0.x, p_0.y), (p_1.x, p_1.y)])
-                    .collect::<Vec<_>>()
-            );
-        println!("surrounding flags: {:?}", segments.iter().map(|(_, f)| *f).collect::<Vec<_>>()); */
         return vec![segments];
     }
 
-    let (first_subdivision_segment_index, first_subdivision_segment) = segments
+    let (first_subdivision_segment_index, &first_subdivision_segment) = segments
         .iter()
         .enumerate()
         .max_by(|(_, (a, _)), (_, (b, _))| {
@@ -1507,16 +1509,29 @@ fn subdivide_face_helper(
                 .total_cmp(&(b[1] - b[0]).norm_squared())
         })
         .unwrap();
-    let (second_subdivision_segment_index, second_subdivision_segment) = segments
+    let mut sorted_other_segments: Vec<(usize, (Segment, bool))> = segments
         .iter()
+        .copied()
         .enumerate()
         .filter(|(i, _)| *i != first_subdivision_segment_index)
-        .max_by(|(_, (a, _)), (_, (b, _))| {
-            (a[1] - a[0])
-                .norm_squared()
-                .total_cmp(&(b[1] - b[0]).norm_squared())
-        })
-        .unwrap();
+        .collect();
+    sorted_other_segments.sort_by(|(_, (a, _)), (_, (b, _))| {
+        ((a[1] - a[0]).norm_squared()
+            * (opposite_edge_sensitivity
+                * (a[1] - a[0])
+                    .dot(&(first_subdivision_segment.0[1] - first_subdivision_segment.0[0])))
+            / (1.0 - opposite_edge_sensitivity))
+            .total_cmp(
+                &((b[1] - b[0]).norm_squared()
+                    * (opposite_edge_sensitivity
+                        * (b[1] - b[0]).dot(
+                            &(first_subdivision_segment.0[1] - first_subdivision_segment.0[0]),
+                        ))
+                    / (1.0 - opposite_edge_sensitivity)),
+            )
+    });
+
+    let (second_subdivision_segment_index, second_subdivision_segment) = sorted_other_segments[0];
 
     let (
         (first_subdivision_segment_index, first_subdivision_segment),
@@ -1579,12 +1594,25 @@ fn subdivide_face_helper(
         .chain(segments[(second_subdivision_segment_index + 1)..segments.len()].to_vec())
         .collect();
 
-    subdivide_face_helper(first_face_subdivision, min_face_area)
-        .into_iter()
-        .chain(subdivide_face_helper(
-            second_face_subdivision,
-            min_face_area,
-        ))
+    subdivide_face_helper(
+        first_face_subdivision,
+        min_face_area,
+        opposite_edge_sensitivity,
+    )
+    .into_iter()
+    .chain(subdivide_face_helper(
+        second_face_subdivision,
+        min_face_area,
+        opposite_edge_sensitivity,
+    ))
+    .collect()
+}
+
+fn simple_face_scale(face: Vec<Point>, scale_factor: f32) -> Vec<Point> {
+    let center = face.iter().fold(Point::zeros(), |acc, v| acc + *v) / face.len() as f32;
+
+    face.into_iter()
+        .map(|vert| (vert - center) * scale_factor + center)
         .collect()
 }
 
@@ -1595,10 +1623,7 @@ mod test {
 
     use crate::{
         street_graph::{
-            AdjacencyList, calc_intersection_point_unbounded, detect_convex_and_concave_vertices,
-            fix_non_manifold_face, path_to_graph, points_are_close, scale_face, segment_end,
-            segment_start, sort_joint_segments, subdivide_face, subdivide_face_helper,
-            truncate_point_to_decimal_place, verts_to_adjacency_list,
+            calc_intersection_point_unbounded, detect_convex_and_concave_vertices, fix_non_manifold_face, path_to_graph, points_are_close, scale_face, segment_end, segment_start, sort_joint_segments, subdivide_face, subdivide_face_helper, truncate_point_to_decimal_place, verts_to_adjacency_list, AdjacencyList, OrderedPoint
         },
         street_plan::ControlPoint,
     };
@@ -3333,7 +3358,7 @@ mod test {
                 .position(|pos| pos == &vertices[vert_index])
                 .unwrap();
             let expected_neighbors_indices = &expected_adjacency_list[&expected_vert_index];
-            let expected_neighbors_vertices: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> =
+            let expected_neighbors_vertices: HashSet<OrderedPoint> =
                 expected_neighbors_indices
                     .iter()
                     .map(|&idx| {
@@ -3343,7 +3368,7 @@ mod test {
                         )
                     })
                     .collect();
-            let real_neighbor_vertices: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> =
+            let real_neighbor_vertices: HashSet<OrderedPoint> =
                 vert_neighbors_indices
                     .iter()
                     .map(|&idx| (OrderedFloat(vertices[idx].x), OrderedFloat(vertices[idx].y)))
@@ -3776,7 +3801,7 @@ mod test {
                 .map(|point| (OrderedFloat(point.x), OrderedFloat(point.y))),
             );
 
-            let real_vert_neighbors: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> =
+            let real_vert_neighbors: HashSet<OrderedPoint> =
                 vert_neighbors_indices
                     .iter()
                     .map(|&idx| (OrderedFloat(verts[idx].x), OrderedFloat(verts[idx].y)))
@@ -4317,14 +4342,14 @@ mod test {
             Point::new(397.90339, 253.04047),
         ];
 
-        let fixed_set: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> =
+        let fixed_set: HashSet<OrderedPoint> =
             HashSet::from_iter(fixed_face.into_iter().map(|p| {
                 let trunc = truncate_point_to_decimal_place(p, 3);
 
                 (OrderedFloat(trunc.x), OrderedFloat(trunc.y))
             }));
 
-        let expected_set: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> =
+        let expected_set: HashSet<OrderedPoint> =
             HashSet::from_iter(expected_face.into_iter().map(|p| {
                 let trunc = truncate_point_to_decimal_place(p, 3);
 
@@ -4345,7 +4370,7 @@ mod test {
             Point::new(0.0, 1.0),
         ];
 
-        let subdivided_faces = subdivide_face(face, 1.5, Vec::new());
+        let subdivided_faces = subdivide_face(face, 1.5, Vec::new(), 0.0);
 
         let expected_faces = vec![
             vec![
@@ -4364,25 +4389,25 @@ mod test {
 
         assert_eq!(subdivided_faces.len(), 2);
 
-        let subdivided_set_0: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> = HashSet::from_iter(
+        let subdivided_set_0: HashSet<OrderedPoint> = HashSet::from_iter(
             subdivided_faces[0]
                 .iter()
                 .map(|point| (OrderedFloat(point.x), OrderedFloat(point.y))),
         );
 
-        let subdivided_set_1: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> = HashSet::from_iter(
+        let subdivided_set_1: HashSet<OrderedPoint> = HashSet::from_iter(
             subdivided_faces[1]
                 .iter()
                 .map(|point| (OrderedFloat(point.x), OrderedFloat(point.y))),
         );
 
-        let expected_set_0: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> = HashSet::from_iter(
+        let expected_set_0: HashSet<OrderedPoint> = HashSet::from_iter(
             expected_faces[0]
                 .iter()
                 .map(|point| (OrderedFloat(point.x), OrderedFloat(point.y))),
         );
 
-        let expected_set_1: HashSet<(OrderedFloat<f32>, OrderedFloat<f32>)> = HashSet::from_iter(
+        let expected_set_1: HashSet<OrderedPoint> = HashSet::from_iter(
             expected_faces[1]
                 .iter()
                 .map(|point| (OrderedFloat(point.x), OrderedFloat(point.y))),
@@ -4416,7 +4441,7 @@ mod test {
         let outer_segments = (0..face.len())
             .map(|i| ([face[i], face[(i + 1) % face.len()]], true))
             .collect();
-        let subdivision = subdivide_face_helper(outer_segments, 6.7);
+        let subdivision = subdivide_face_helper(outer_segments, 6.7, 0.0);
 
         assert_eq!(subdivision.len(), 2);
 
@@ -4442,7 +4467,7 @@ mod test {
         let outer_segments = (0..face.len())
             .map(|i| ([face[i], face[(i + 1) % face.len()]], true))
             .collect();
-        let subdivision = subdivide_face_helper(outer_segments, 1.5);
+        let subdivision = subdivide_face_helper(outer_segments, 1.5, 0.0);
         assert_eq!(subdivision.len(), 9);
         subdivision.iter().for_each(|segments| {
             println!(
