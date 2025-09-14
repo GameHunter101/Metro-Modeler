@@ -160,6 +160,7 @@ impl GrammarShape for BuildingShape {
         rng: &mut dyn RngCore,
         max_building_height: u32,
     ) -> Vec<Box<dyn GrammarShape>> {
+        todo!()
     }
 }
 
@@ -174,7 +175,7 @@ struct TierBottom {
 }
 
 impl GrammarShape for TierBottom {
-    fn advance_lod(&self) -> LOD {}
+    fn advance_lod(&self) -> LOD {todo!()}
 
     fn advance(
         &self,
@@ -229,6 +230,45 @@ fn iterate_grammar(
 }
 
 fn cut_shapes(shapes: Vec<Vec<Point>>) -> Vec<Vec<Point>> {
+    let shapes_len = shapes.len();
+
+    let (vertices, disjoint_faces, verts_to_shape) = split_shapes_to_disjoint_faces(shapes);
+
+    let mut shape_indices_to_face_indices: HashMap<usize, HashSet<usize>> = HashMap::new();
+    for (face_index, face) in disjoint_faces.iter().enumerate() {
+        for vert_idx in face {
+            if let Some(shape_index) = verts_to_shape.get(&order_point(vertices[*vert_idx])) {
+                if let Some(existing_set) = shape_indices_to_face_indices.get_mut(shape_index) {
+                    existing_set.insert(face_index);
+                } else {
+                    shape_indices_to_face_indices
+                        .insert(*shape_index, HashSet::from_iter(Some(face_index)));
+                }
+            }
+        }
+    }
+
+    let face_indices_of_each_shape: Vec<Vec<usize>> = (0..shapes_len)
+        .map(|shape_index| {
+            let all_faces_of_current_shape = &shape_indices_to_face_indices[&shape_index];
+            let all_faces_of_previous_shapes =
+                (0..shape_index).fold(HashSet::<usize>::new(), |acc, previous_shape_index| {
+                    acc.union(&shape_indices_to_face_indices[&previous_shape_index])
+                        .copied()
+                        .collect()
+                });
+
+            all_faces_of_current_shape
+                .difference(&all_faces_of_previous_shapes)
+                .copied()
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    todo!()
+}
+
+fn split_shapes_to_disjoint_faces(shapes: Vec<Vec<Point>>) -> (Vec<Point>, Vec<Vec<usize>>, HashMap<OrderedPoint, usize>) {
     let verts_to_shape: HashMap<OrderedPoint, usize> = shapes
         .iter()
         .enumerate()
@@ -246,7 +286,7 @@ fn cut_shapes(shapes: Vec<Vec<Point>>) -> Vec<Vec<Point>> {
             shape
                 .iter()
                 .enumerate()
-                .map(|(i, point)| [*point, shape[i + 1]])
+                .map(|(i, point)| [*point, shape[(i + 1) % shape.len()]])
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -255,39 +295,35 @@ fn cut_shapes(shapes: Vec<Vec<Point>>) -> Vec<Vec<Point>> {
 
     let dcel = DCEL::new(&vertices, &adjacency_list);
 
-    /* let shape_indices_to_face_indices: HashMap<usize, HashSet<usize>> = dcel
-    .faces()
-    .iter()
-    .enumerate()
-    .map(|(face_index, face)| {
-        let shape_indices: HashSet<usize> = face
-            .iter()
-            .flat_map(|vert_idx| {
-                if let Some(shape_idx) = verts_to_shape.get(&order_point(vertices[*vert_idx])) {
-                    Some(*shape_idx)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        (shape_indices, vec![face_index])
-    })
-    .collect(); */
-    let mut shape_indices_to_face_indices: HashMap<usize, HashSet<usize>> = HashMap::new();
-    for (face_index, face) in dcel.faces().iter().enumerate() {
-        let shapes_of_face: HashSet<usize> = face
-            .iter()
-            .flat_map(|vert_idx| {
-                verts_to_shape.get(&order_point(vertices[*vert_idx])).copied()
-            }).collect();
-        for shape_index in shapes_of_face {
-            if let Some(faces) = shape_indices_to_face_indices.get_mut(&shape_index) {
-                faces.insert(face_index);
-            } else {
-                shape_indices_to_face_indices.insert(shape_index, HashSet::from_iter(vec![face_index]));
-            }
-        }
-    }
+    (vertices, dcel.faces().to_vec(), verts_to_shape)
+}
 
-    todo!()
+mod test {
+    use std::collections::HashSet;
+
+    use crate::{building_generation::split_shapes_to_disjoint_faces, tensor_field::Point};
+
+    #[test]
+    fn simple_overlapping_shapes_are_split() {
+        let rect = vec![
+            Point::new(0.0, 0.0),
+            Point::new(2.0, 0.0),
+            Point::new(2.0, 1.0),
+            Point::new(0.0, 1.0),
+        ];
+        let triangle = vec![
+            Point::new(1.0, 0.0),
+            Point::new(4.0, 0.0),
+            Point::new(3.0, 1.0),
+        ];
+
+        let (_, split_faces, _) = split_shapes_to_disjoint_faces(vec![rect, triangle]);
+
+        assert_eq!(split_faces.len(), 3);
+
+        let real_lengths: HashSet<usize> = split_faces.iter().map(|face| face.len()).collect();
+        let expected_lengths = HashSet::from_iter(vec![5, 3, 4]);
+
+        assert_eq!(real_lengths.difference(&expected_lengths).count(), 0);
+    }
 }
