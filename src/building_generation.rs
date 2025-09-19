@@ -175,7 +175,9 @@ struct TierBottom {
 }
 
 impl GrammarShape for TierBottom {
-    fn advance_lod(&self) -> LOD {todo!()}
+    fn advance_lod(&self) -> LOD {
+        todo!()
+    }
 
     fn advance(
         &self,
@@ -229,46 +231,49 @@ fn iterate_grammar(
         .collect()
 }
 
-fn cut_shapes(shapes: Vec<Vec<Point>>) -> Vec<Vec<Point>> {
-    let shapes_len = shapes.len();
-
-    let (vertices, disjoint_faces, verts_to_shape) = split_shapes_to_disjoint_faces(shapes);
-
-    let mut shape_indices_to_face_indices: HashMap<usize, HashSet<usize>> = HashMap::new();
-    for (face_index, face) in disjoint_faces.iter().enumerate() {
-        for vert_idx in face {
-            if let Some(shape_index) = verts_to_shape.get(&order_point(vertices[*vert_idx])) {
-                if let Some(existing_set) = shape_indices_to_face_indices.get_mut(shape_index) {
-                    existing_set.insert(face_index);
-                } else {
-                    shape_indices_to_face_indices
-                        .insert(*shape_index, HashSet::from_iter(Some(face_index)));
-                }
-            }
-        }
+fn cut_shapes(shapes: Vec<Vec<Point>>, shapes_cut: usize) -> Vec<Vec<Point>> {
+    if shapes.len() == 1 {
+        return shapes;
     }
 
-    let face_indices_of_each_shape: Vec<Vec<usize>> = (0..shapes_len)
-        .map(|shape_index| {
-            let all_faces_of_current_shape = &shape_indices_to_face_indices[&shape_index];
-            let all_faces_of_previous_shapes =
-                (0..shape_index).fold(HashSet::<usize>::new(), |acc, previous_shape_index| {
-                    acc.union(&shape_indices_to_face_indices[&previous_shape_index])
-                        .copied()
-                        .collect()
-                });
+    let first_shape = shapes[1].clone();
+    let shapes_len = shapes.len();
 
-            all_faces_of_current_shape
-                .difference(&all_faces_of_previous_shapes)
-                .copied()
-                .collect::<Vec<_>>()
+    let other_cut_shapes: Vec<Vec<Point>> = shapes
+        .into_iter()
+        .enumerate()
+        .flat_map(|(shape_index, shape)| {
+            if shape_index == 0 {
+                return None;
+            }
+            let shape_index = shape_index + 1 + shapes_cut;
+            let (all_vertices, disjoint_faces, vert_indices_to_shape) =
+                split_shapes_to_disjoint_faces(vec![first_shape.clone(), shape]);
+
+            disjoint_faces
+                .into_iter()
+                .filter(|face| {
+                    face_to_shape(face, &all_vertices, &vert_indices_to_shape) == Some(shape_index)
+                })
+                .next()
+                .map(|face_by_indices| {
+                    face_by_indices
+                        .iter()
+                        .map(|vert_idx| all_vertices[*vert_idx])
+                        .collect::<Vec<_>>()
+                })
         })
         .collect();
 
+    let mut final_shapes = Vec::with_capacity(shapes_len);
+    final_shapes.push(first_shape);
+    final_shapes.extend(other_cut_shapes);
     todo!()
 }
 
-fn split_shapes_to_disjoint_faces(shapes: Vec<Vec<Point>>) -> (Vec<Point>, Vec<Vec<usize>>, HashMap<OrderedPoint, usize>) {
+fn split_shapes_to_disjoint_faces(
+    shapes: Vec<Vec<Point>>,
+) -> (Vec<Point>, Vec<Vec<usize>>, HashMap<usize, usize>) {
     let verts_to_shape: HashMap<OrderedPoint, usize> = shapes
         .iter()
         .enumerate()
@@ -295,7 +300,54 @@ fn split_shapes_to_disjoint_faces(shapes: Vec<Vec<Point>>) -> (Vec<Point>, Vec<V
 
     let dcel = DCEL::new(&vertices, &adjacency_list);
 
-    (vertices, dcel.faces().to_vec(), verts_to_shape)
+    let vert_indices_to_shape = vertices
+        .iter()
+        .enumerate()
+        .map(|(i, vert)| (i, verts_to_shape[&order_point(*vert)]))
+        .collect();
+
+    (vertices, dcel.faces().to_vec(), vert_indices_to_shape)
+}
+
+fn face_to_shape(
+    face: &[usize],
+    vertices: &[Point],
+    verts_to_shape: &HashMap<usize, usize>,
+) -> Option<usize> {
+    let start_vertex_index = (0..face.len()).fold(0, |acc, vert_index| {
+        let current_vert = vertices[face[vert_index]];
+        let previous_vert = vertices[face[acc]];
+        if verts_to_shape.contains_key(&face[vert_index]) {
+            match current_vert.x.total_cmp(&previous_vert.x) {
+                Ordering::Less => vert_index,
+                Ordering::Equal => {
+                    if current_vert.y < previous_vert.y {
+                        vert_index
+                    } else {
+                        acc
+                    }
+                }
+                Ordering::Greater => acc,
+            }
+        } else {
+            acc
+        }
+    });
+
+    let mut between_intersection_points = false;
+    for i in 0..face.len() {
+        let current_vert_index = face[(start_vertex_index + i) % face.len()];
+
+        if !verts_to_shape.contains_key(&current_vert_index) {
+            between_intersection_points = !between_intersection_points;
+        }
+
+        if !between_intersection_points {
+            return Some(verts_to_shape[&current_vert_index]);
+        }
+    }
+
+    None
 }
 
 mod test {
