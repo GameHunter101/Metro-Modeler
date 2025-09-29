@@ -212,6 +212,9 @@ pub fn find_interesctions(
         }
 
         let sorted = status.is_sorted(event.position().y, segments);
+        if !sorted {
+            dbg!(event);
+        }
         assert!(sorted);
     }
 
@@ -489,6 +492,7 @@ fn update_status_with_end_point(
     mut end_points_are_intersections: bool,
 ) -> (Vec<EventPoint>, Option<IntersectionPoint>) {
     let original_status_len = status.len();
+    let pre = status.to_vec();
 
     let event_segment_indices_vec: Vec<usize> = event.segment_indices().iter().copied().collect();
     let (sorted_segment_indices, _) =
@@ -566,9 +570,11 @@ fn update_status_with_end_point(
         end_intersection_segments.extend(sorted_segment_indices);
     }
 
+    let post = status.to_vec();
     assert_eq!(
         status.len(),
-        original_status_len - event_segment_indices_vec.len()
+        original_status_len - event_segment_indices_vec.len(),
+        "Event {event:?} caused an error"
     );
     (
         potential_lower_intersection_event,
@@ -967,8 +973,7 @@ fn process_raw_block_verts(
 fn verts_to_adjacency_list(face: &[Point]) -> (Vec<Point>, AdjacencyList) {
     let mut full_face = Vec::new();
 
-    let mut vertex_pos_to_index: HashMap<OrderedPoint, usize> =
-        HashMap::new();
+    let mut vertex_pos_to_index: HashMap<OrderedPoint, usize> = HashMap::new();
 
     let mut adjacency_list = AdjacencyList::new();
 
@@ -1442,12 +1447,11 @@ fn subdivide_face(
     inner_segments: Vec<Segment>,
     opposite_edge_sensitivity: f32,
 ) -> Vec<Vec<Point>> {
-    let inner_segments_set: HashSet<[OrderedPoint; 2]> =
-        HashSet::from_iter(
-            inner_segments
-                .into_iter()
-                .map(|segment| order_segment(segment)),
-        );
+    let inner_segments_set: HashSet<[OrderedPoint; 2]> = HashSet::from_iter(
+        inner_segments
+            .into_iter()
+            .map(|segment| order_segment(segment)),
+    );
 
     let outer_segments = (0..face.len())
         .map(|i| {
@@ -1623,7 +1627,11 @@ mod test {
 
     use crate::{
         street_graph::{
-            calc_intersection_point_unbounded, detect_convex_and_concave_vertices, fix_non_manifold_face, path_to_graph, points_are_close, scale_face, segment_end, segment_start, sort_joint_segments, subdivide_face, subdivide_face_helper, truncate_point_to_decimal_place, verts_to_adjacency_list, AdjacencyList, OrderedPoint
+            AdjacencyList, OrderedPoint, calc_intersection_point_unbounded,
+            detect_convex_and_concave_vertices, fix_non_manifold_face, path_to_graph,
+            points_are_close, scale_face, segment_end, segment_start, sort_joint_segments,
+            subdivide_face, subdivide_face_helper, truncate_point_to_decimal_place,
+            verts_to_adjacency_list,
         },
         street_plan::ControlPoint,
     };
@@ -3358,21 +3366,19 @@ mod test {
                 .position(|pos| pos == &vertices[vert_index])
                 .unwrap();
             let expected_neighbors_indices = &expected_adjacency_list[&expected_vert_index];
-            let expected_neighbors_vertices: HashSet<OrderedPoint> =
-                expected_neighbors_indices
-                    .iter()
-                    .map(|&idx| {
-                        (
-                            OrderedFloat(expected_vertices[idx].x),
-                            OrderedFloat(expected_vertices[idx].y),
-                        )
-                    })
-                    .collect();
-            let real_neighbor_vertices: HashSet<OrderedPoint> =
-                vert_neighbors_indices
-                    .iter()
-                    .map(|&idx| (OrderedFloat(vertices[idx].x), OrderedFloat(vertices[idx].y)))
-                    .collect();
+            let expected_neighbors_vertices: HashSet<OrderedPoint> = expected_neighbors_indices
+                .iter()
+                .map(|&idx| {
+                    (
+                        OrderedFloat(expected_vertices[idx].x),
+                        OrderedFloat(expected_vertices[idx].y),
+                    )
+                })
+                .collect();
+            let real_neighbor_vertices: HashSet<OrderedPoint> = vert_neighbors_indices
+                .iter()
+                .map(|&idx| (OrderedFloat(vertices[idx].x), OrderedFloat(vertices[idx].y)))
+                .collect();
 
             assert_eq!(
                 expected_neighbors_vertices.len(),
@@ -3801,11 +3807,10 @@ mod test {
                 .map(|point| (OrderedFloat(point.x), OrderedFloat(point.y))),
             );
 
-            let real_vert_neighbors: HashSet<OrderedPoint> =
-                vert_neighbors_indices
-                    .iter()
-                    .map(|&idx| (OrderedFloat(verts[idx].x), OrderedFloat(verts[idx].y)))
-                    .collect();
+            let real_vert_neighbors: HashSet<OrderedPoint> = vert_neighbors_indices
+                .iter()
+                .map(|&idx| (OrderedFloat(verts[idx].x), OrderedFloat(verts[idx].y)))
+                .collect();
 
             assert_eq!(real_vert_neighbors.len(), expected_neighbors.len());
 
@@ -4478,5 +4483,29 @@ mod test {
                     .collect::<Vec<_>>()
             )
         });
+    }
+
+    #[test]
+    fn colinear_intersection() {
+        // TODO: Fix colinear intersections
+        let segments = [
+            [Point::new(0.0, 0.0), Point::new(2.0, 0.0)],
+            [Point::new(1.0, 0.0), Point::new(4.0, 0.0)],
+        ];
+        let intersections = find_interesctions(&segments, true);
+
+        assert_eq!(intersections.len(), 4);
+        assert!(intersections.iter().any(|point| points_are_close(
+            point.position(),
+            Point::new(1.0, 0.0)
+        )
+            && point.intersecting_segment_indices.contains(&0)
+            && point.intersecting_segment_indices.contains(&1)));
+        assert!(intersections.iter().any(|point| points_are_close(
+            point.position(),
+            Point::new(2.0, 0.0)
+        )
+            && point.intersecting_segment_indices.contains(&0)
+            && point.intersecting_segment_indices.contains(&1)));
     }
 }

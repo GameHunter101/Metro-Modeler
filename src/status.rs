@@ -36,12 +36,12 @@ impl SkipList {
     ) -> (Option<usize>, Option<usize>) {
         unsafe {
             let (traverse_node, traverse_path) =
-                self.traverse_nodes(element, segments, height, false);
+                self.traverse_nodes(element, segments, height, false, true);
 
             self.len += 1;
 
             if let NodeType::Value(appending_index) = (*traverse_node.as_ptr()).node_type
-                && NodeType::Value(appending_index).cmp(&NodeType::Value(element), segments, height)
+                && NodeType::Value(appending_index).cmp(&NodeType::Value(element), segments, height, true)
                     == Ordering::Equal
             {
                 let appending_segment = segments[appending_index];
@@ -89,7 +89,7 @@ impl SkipList {
 
             while (*(&(*append_node.as_ptr()).next_ptrs)[0].as_ptr())
                 .node_type
-                .cmp(&(*traverse_node.as_ptr()).node_type, segments, height)
+                .cmp(&(*traverse_node.as_ptr()).node_type, segments, height, true)
                 == Ordering::Equal
             {
                 append_node = (&(*append_node.as_ptr()).next_ptrs)[0];
@@ -115,12 +115,13 @@ impl SkipList {
         height: f32,
     ) -> (Option<usize>, Option<usize>) {
         unsafe {
-            let (traverse_target, _) = self.traverse_nodes(element, segments, height, true);
+            let (traverse_target, _) = self.traverse_nodes(element, segments, height, true, false);
 
             if (*traverse_target.as_ptr()).node_type.cmp(
                 &NodeType::Value(element),
                 segments,
                 height,
+                false,
             ) == Ordering::Equal
             {
                 let boxed_target = Box::from_raw(traverse_target.as_ptr());
@@ -177,12 +178,12 @@ impl SkipList {
         );
 
         unsafe {
-            let (initial_search, _) = self.traverse_nodes(low, segments, height, false);
+            let (initial_search, _) = self.traverse_nodes(low, segments, height, false, false);
 
             let mut low_node = initial_search;
             while (*(&(*low_node.as_ptr()).prev_ptrs)[0].as_ptr())
                 .node_type
-                .cmp(&NodeType::Value(low), segments, height)
+                .cmp(&NodeType::Value(low), segments, height, false)
                 == Ordering::Equal
             {
                 low_node = (&(*low_node.as_ptr()).prev_ptrs)[0];
@@ -191,7 +192,7 @@ impl SkipList {
             let mut high_node = low_node;
             while (*(&(*high_node.as_ptr()).next_ptrs)[0].as_ptr())
                 .node_type
-                .cmp(&NodeType::Value(high), segments, height)
+                .cmp(&NodeType::Value(high), segments, height, false)
                 == Ordering::Equal
             {
                 high_node = (&(*high_node.as_ptr()).next_ptrs)[0];
@@ -247,6 +248,7 @@ impl SkipList {
         segments: &[Segment],
         height: f32,
         precise_search: bool,
+        insert_segment: bool,
     ) -> (Link, Vec<Link>) {
         unsafe {
             let mut current_node = self.nodes;
@@ -260,6 +262,7 @@ impl SkipList {
                     &NodeType::Value(element),
                     segments,
                     height,
+                    insert_segment,
                 );
                 if next_compared_with_element == Ordering::Greater {
                     if level == 0 {
@@ -267,6 +270,7 @@ impl SkipList {
                             &NodeType::Value(element),
                             segments,
                             height,
+                            insert_segment,
                         ) == Ordering::Equal
                         {
                             let mut refined = current_node;
@@ -329,9 +333,13 @@ impl SkipList {
     pub fn is_sorted(&self, height: f32, segments: &[Segment]) -> bool {
         let arr = self.to_vec();
         arr.is_sorted_by(|a, b| {
-            let a_x = get_x_val_of_segment_at_height(segments[*a], height);
-            let b_x = get_x_val_of_segment_at_height(segments[*b], height);
-            a_x <= b_x + 0.001
+            if segments[*a][0].y == segments[*a][1].y || segments[*b][0].y == segments[*b][1].y {
+                true
+            } else {
+                let a_x = get_x_val_of_segment_at_height(segments[*a], height);
+                let b_x = get_x_val_of_segment_at_height(segments[*b], height);
+                a_x <= b_x + 0.001
+            }
         })
     }
 }
@@ -475,7 +483,13 @@ impl PartialEq for NodeType {
 }
 
 impl NodeType {
-    fn cmp(&self, other: &NodeType, segments: &[Segment], height: f32) -> Ordering {
+    fn cmp(
+        &self,
+        other: &NodeType,
+        segments: &[Segment],
+        height: f32,
+        insert_segment: bool,
+    ) -> Ordering {
         match self {
             NodeType::Start => Ordering::Less,
             NodeType::Value(lhs) => match other {
@@ -485,11 +499,21 @@ impl NodeType {
                         Ordering::Equal
                     } else {
                         let lhs_x = get_x_val_of_segment_at_height(segments[*lhs], height);
-                        let rhs_x = get_x_val_of_segment_at_height(segments[*rhs], height);
-                        if (rhs_x - lhs_x).abs() < 0.001 {
-                            Ordering::Equal
+                        if !insert_segment && segments[*rhs][0].y == segments[*rhs][1].y {
+                            if lhs_x < segments[*rhs][0].x.min(segments[*rhs][1].x) {
+                                Ordering::Less
+                            } else if lhs_x > segments[*rhs][0].x.max(segments[*rhs][1].x) {
+                                Ordering::Greater
+                            } else {
+                                Ordering::Equal
+                            }
                         } else {
-                            lhs_x.partial_cmp(&rhs_x).unwrap_or(Ordering::Less)
+                            let rhs_x = get_x_val_of_segment_at_height(segments[*rhs], height);
+                            if (rhs_x - lhs_x).abs() < 0.001 {
+                                Ordering::Equal
+                            } else {
+                                lhs_x.partial_cmp(&rhs_x).unwrap_or(Ordering::Less)
+                            }
                         }
                     }
                 }

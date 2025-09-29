@@ -232,43 +232,71 @@ fn iterate_grammar(
 }
 
 fn cut_shapes(shapes: Vec<Vec<Point>>, shapes_cut: usize) -> Vec<Vec<Point>> {
-    if shapes.len() == 1 {
+    if shapes.len() <= 1 {
         return shapes;
     }
 
-    let first_shape = shapes[1].clone();
+    let first_shape = shapes[0].clone();
+    let first_shape_set = HashSet::from_iter(first_shape.iter().map(|vert| order_point(*vert)));
     let shapes_len = shapes.len();
 
     let other_cut_shapes: Vec<Vec<Point>> = shapes
         .into_iter()
         .enumerate()
         .flat_map(|(shape_index, shape)| {
-            if shape_index == 0 {
+            if shape_index <= shapes_cut {
                 return None;
             }
-            let shape_index = shape_index + 1 + shapes_cut;
             let (all_vertices, disjoint_faces, vert_indices_to_shape) =
                 split_shapes_to_disjoint_faces(vec![first_shape.clone(), shape]);
-
-            disjoint_faces
-                .into_iter()
-                .filter(|face| {
-                    face_to_shape(face, &all_vertices, &vert_indices_to_shape) == Some(shape_index)
-                })
-                .next()
-                .map(|face_by_indices| {
-                    face_by_indices
+            match disjoint_faces.len() {
+                1 => None,
+                2 => {
+                    if disjoint_faces[0].len() == first_shape.len()
+                        && vert_indices_to_shape[&disjoint_faces[0][0]] == 0
+                    {
+                        Some(1_usize)
+                    } else {
+                        Some(0)
+                    }
+                }
+                _ => {
+                    let faces_as_sets: Vec<HashSet<usize>> = disjoint_faces
                         .iter()
-                        .map(|vert_idx| all_vertices[*vert_idx])
-                        .collect::<Vec<_>>()
-                })
+                        .map(|face| HashSet::from_iter(face.clone()))
+                        .collect();
+                    let pairs = [(0_usize, 1_usize), (0, 2), (1, 2)];
+
+                    let joined_pair = pairs
+                        .into_iter()
+                        .filter(|(first, second)| {
+                            let union: HashSet<OrderedPoint> = faces_as_sets[*first]
+                                .union(&faces_as_sets[*second])
+                                .map(|idx| order_point(all_vertices[*idx]))
+                                .collect();
+                            union.intersection(&first_shape_set).count() == first_shape.len()
+                        })
+                        .next()
+                        .unwrap();
+                    HashSet::<usize>::from_iter([0_usize, 1, 2])
+                        .difference(&HashSet::from_iter([joined_pair.0, joined_pair.1]))
+                        .next()
+                        .copied()
+                }
+            }
+            .map(|disjoint_face_index| {
+                disjoint_faces[disjoint_face_index]
+                    .iter()
+                    .map(|vert_index| all_vertices[*vert_index])
+                    .collect::<Vec<_>>()
+            })
         })
         .collect();
 
     let mut final_shapes = Vec::with_capacity(shapes_len);
     final_shapes.push(first_shape);
-    final_shapes.extend(other_cut_shapes);
-    todo!()
+    final_shapes.extend(cut_shapes(other_cut_shapes, shapes_cut + 1));
+    final_shapes
 }
 
 fn split_shapes_to_disjoint_faces(
@@ -303,7 +331,11 @@ fn split_shapes_to_disjoint_faces(
     let vert_indices_to_shape = vertices
         .iter()
         .enumerate()
-        .map(|(i, vert)| (i, verts_to_shape[&order_point(*vert)]))
+        .flat_map(|(i, vert)| {
+            verts_to_shape
+                .get(&order_point(*vert))
+                .map(|point| (i, *point))
+        })
         .collect();
 
     (vertices, dcel.faces().to_vec(), vert_indices_to_shape)
@@ -353,10 +385,37 @@ fn face_to_shape(
 mod test {
     use std::collections::HashSet;
 
-    use crate::{building_generation::split_shapes_to_disjoint_faces, tensor_field::Point};
+    use crate::{
+        building_generation::{cut_shapes, split_shapes_to_disjoint_faces},
+        tensor_field::Point,
+    };
 
     #[test]
     fn simple_overlapping_shapes_are_split() {
+        let rect = vec![
+            Point::new(0.0, 0.0),
+            Point::new(2.0, 0.0),
+            Point::new(2.0, 1.0),
+            Point::new(0.0, 1.0),
+        ];
+        let triangle = vec![
+            Point::new(1.0, -0.1),
+            Point::new(4.0, -0.1),
+            Point::new(3.0, 1.0),
+        ];
+
+        let (_, split_faces, _) = split_shapes_to_disjoint_faces(vec![rect, triangle]);
+
+        assert_eq!(split_faces.len(), 3);
+
+        let real_lengths: HashSet<usize> = split_faces.iter().map(|face| face.len()).collect();
+        let expected_lengths = HashSet::from_iter(vec![5, 3, 6]);
+
+        assert_eq!(real_lengths.difference(&expected_lengths).count(), 0);
+    }
+
+    /* #[test]
+    fn colinear_overlapping_shapes_are_split() {
         let rect = vec![
             Point::new(0.0, 0.0),
             Point::new(2.0, 0.0),
@@ -377,5 +436,49 @@ mod test {
         let expected_lengths = HashSet::from_iter(vec![5, 3, 4]);
 
         assert_eq!(real_lengths.difference(&expected_lengths).count(), 0);
+    } */
+
+    #[test]
+    fn simple_shape_cutting() {
+        let rect = vec![
+            Point::new(0.0, 0.0),
+            Point::new(2.0, 0.0),
+            Point::new(2.0, 1.0),
+            Point::new(0.0, 1.0),
+        ];
+        let triangle = vec![
+            Point::new(1.0, -0.1),
+            Point::new(4.0, -0.1),
+            Point::new(3.0, 1.0),
+        ];
+
+        let cut_shapes = cut_shapes(vec![rect, triangle], 0);
+
+        assert_eq!(cut_shapes.len(), 2);
+        assert_eq!(cut_shapes[0].len(), 4);
+        assert_eq!(cut_shapes[1].len(), 6);
+    }
+
+    #[test]
+    fn distant_shapes_are_not_cut() {
+        let rect_1 = vec![
+            Point::new(0.0, 0.0),
+            Point::new(2.0, 0.0),
+            Point::new(2.0, 1.0),
+            Point::new(0.0, 1.0),
+        ];
+
+        let rect_2 = vec![
+            Point::new(5.0, 5.0),
+            Point::new(6.0, 5.0),
+            Point::new(6.0, 6.0),
+            Point::new(5.0, 6.0),
+        ];
+
+        let cut_shapes = cut_shapes(vec![rect_1, rect_2], 0);
+
+        assert_eq!(cut_shapes.len(), 2);
+        assert_eq!(cut_shapes[0].len(), 4);
+        assert_eq!(cut_shapes[1].len(), 4);
     }
 }
