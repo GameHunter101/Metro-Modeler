@@ -1,5 +1,6 @@
 use cool_utils::data_structures::dcel::DCEL;
 use dyn_clone::DynClone;
+use nalgebra::Matrix2;
 use rand::prelude::*;
 use std::{
     cmp::Ordering,
@@ -232,6 +233,17 @@ fn iterate_grammar(
 }
 
 fn cut_shapes(shapes: Vec<Vec<Point>>, shapes_cut: usize) -> Vec<Vec<Point>> {
+    println!("Shapes:");
+    shapes.iter().for_each(|shape| {
+        println!(
+            "polygon({:?})",
+            shape
+                .iter()
+                .map(|vert| (vert.x, vert.y))
+                .collect::<Vec<_>>()
+        )
+    });
+
     if shapes.len() <= 1 {
         return shapes;
     }
@@ -247,9 +259,25 @@ fn cut_shapes(shapes: Vec<Vec<Point>>, shapes_cut: usize) -> Vec<Vec<Point>> {
             if shape_index <= shapes_cut {
                 return None;
             }
+
+            if is_face_in_face(&shape, &first_shape) || is_face_in_face(&first_shape, &shape) {
+                return None;
+            }
+
             let (all_vertices, disjoint_faces, vert_indices_to_shape) =
                 split_shapes_to_disjoint_faces(vec![first_shape.clone(), shape]);
-            match disjoint_faces.len() {
+
+            dbg!(disjoint_faces.len());
+            println!("VERTICES: {:?}", all_vertices.iter().map(|v| (v.x, v.y)).collect::<Vec<_>>());
+            println!(
+                "DISJOINT FACES: {:?}",
+               disjoint_faces 
+                    .iter()
+                    .map(|face| face.iter().map(|&vert| (all_vertices[vert].x, all_vertices[vert].y)).collect::<Vec<_>>())
+                    .collect::<Vec<_>>()
+            );
+
+            let temp = match disjoint_faces.len() {
                 1 => None,
                 2 => {
                     if disjoint_faces[0].len() == first_shape.len()
@@ -275,6 +303,7 @@ fn cut_shapes(shapes: Vec<Vec<Point>>, shapes_cut: usize) -> Vec<Vec<Point>> {
                                 .map(|idx| order_point(all_vertices[*idx]))
                                 .collect();
                             union.intersection(&first_shape_set).count() == first_shape.len()
+                                && union.len() == first_shape.len() + 2
                         })
                         .next()
                         .unwrap();
@@ -289,13 +318,17 @@ fn cut_shapes(shapes: Vec<Vec<Point>>, shapes_cut: usize) -> Vec<Vec<Point>> {
                     .iter()
                     .map(|vert_index| all_vertices[*vert_index])
                     .collect::<Vec<_>>()
-            })
+            });
+            // dbg!(&temp);
+            temp
         })
         .collect();
 
+    dbg!(other_cut_shapes.len());
+
     let mut final_shapes = Vec::with_capacity(shapes_len);
     final_shapes.push(first_shape);
-    final_shapes.extend(cut_shapes(other_cut_shapes, shapes_cut + 1));
+    final_shapes.extend(cut_shapes(other_cut_shapes, 0));
     final_shapes
 }
 
@@ -341,47 +374,21 @@ fn split_shapes_to_disjoint_faces(
     (vertices, dcel.faces().to_vec(), vert_indices_to_shape)
 }
 
-fn face_to_shape(
-    face: &[usize],
-    vertices: &[Point],
-    verts_to_shape: &HashMap<usize, usize>,
-) -> Option<usize> {
-    let start_vertex_index = (0..face.len()).fold(0, |acc, vert_index| {
-        let current_vert = vertices[face[vert_index]];
-        let previous_vert = vertices[face[acc]];
-        if verts_to_shape.contains_key(&face[vert_index]) {
-            match current_vert.x.total_cmp(&previous_vert.x) {
-                Ordering::Less => vert_index,
-                Ordering::Equal => {
-                    if current_vert.y < previous_vert.y {
-                        vert_index
-                    } else {
-                        acc
-                    }
-                }
-                Ordering::Greater => acc,
-            }
-        } else {
-            acc
-        }
-    });
-
-    let mut between_intersection_points = false;
-    for i in 0..face.len() {
-        let current_vert_index = face[(start_vertex_index + i) % face.len()];
-
-        if !verts_to_shape.contains_key(&current_vert_index) {
-            between_intersection_points = !between_intersection_points;
-        }
-
-        if !between_intersection_points {
-            return Some(verts_to_shape[&current_vert_index]);
-        }
-    }
-
-    None
+fn is_face_in_face(inner: &[Point], outer: &[Point]) -> bool {
+    inner.iter().all(|vert| is_point_in_face(*vert, outer))
 }
 
+fn is_point_in_face(point: Point, face: &[Point]) -> bool {
+    (0..face.len())
+        .map(|i| {
+            Matrix2::from_columns(&[face[i], point]).determinant()
+                + Matrix2::from_columns(&[point, face[(i + 1) % face.len()]]).determinant()
+                + Matrix2::from_columns(&[face[(i + 1) % face.len()], face[i]]).determinant()
+        })
+        .all(|det_res| det_res < 0.0)
+}
+
+#[cfg(test)]
 mod test {
     use std::collections::HashSet;
 
@@ -456,7 +463,44 @@ mod test {
 
         assert_eq!(cut_shapes.len(), 2);
         assert_eq!(cut_shapes[0].len(), 4);
+        // println!("{:?}", cut_shapes.iter().map(|face| face.iter().map(|vert| (vert.x, vert.y)).collect::<Vec<_>>()).collect::<Vec<_>>());
         assert_eq!(cut_shapes[1].len(), 6);
+    }
+
+    #[test]
+    fn complex_shape_cutting() {
+        let rect = vec![
+            Point::new(0.0, 0.0),
+            Point::new(2.0, 0.0),
+            Point::new(2.0, 1.0),
+            Point::new(0.0, 1.0),
+        ];
+        let triangle = vec![
+            Point::new(1.0, -0.1),
+            Point::new(4.0, -0.1),
+            Point::new(3.0, 1.0),
+        ];
+        let circle: Vec<Point> = (0..10)
+            .map(|i| {
+                Point::new(
+                    (std::f32::consts::PI / 5.0 * i as f32).cos() + 1.5,
+                    (std::f32::consts::PI / 5.0 * i as f32).sin() + 1.0,
+                )
+            })
+            .collect();
+
+        let cut_shapes = cut_shapes(vec![rect, triangle, circle], 0);
+        println!(
+            "{:?}",
+            cut_shapes
+                .iter()
+                .map(|face| face.iter().map(|vert| (vert.x, vert.y)).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        );
+
+        assert_eq!(cut_shapes.len(), 3);
+        assert_eq!(cut_shapes[0].len(), 4);
+        // assert_eq!(cut_shapes[1].len(), 6);
     }
 
     #[test]
@@ -480,5 +524,27 @@ mod test {
         assert_eq!(cut_shapes.len(), 2);
         assert_eq!(cut_shapes[0].len(), 4);
         assert_eq!(cut_shapes[1].len(), 4);
+    }
+
+    #[test]
+    fn inset_face_is_removed() {
+        let rect_1 = vec![
+            Point::new(0.0, 0.0),
+            Point::new(2.0, 0.0),
+            Point::new(2.0, 1.0),
+            Point::new(0.0, 1.0),
+        ];
+
+        let rect_2 = vec![
+            Point::new(1.0, 0.25),
+            Point::new(1.5, 0.25),
+            Point::new(1.5, 0.5),
+            Point::new(1.0, 0.5),
+        ];
+
+        let cut_shapes = cut_shapes(vec![rect_1, rect_2], 0);
+
+        assert_eq!(cut_shapes.len(), 1);
+        assert_eq!(cut_shapes[0].len(), 4);
     }
 }
