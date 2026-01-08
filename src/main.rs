@@ -13,12 +13,15 @@ use v4::{
 };
 use wgpu::vertex_attr_array;
 
+use crate::triangulation::triangulate_faces;
+
 mod building_generation;
 mod event_queue;
 mod status;
 mod street_graph;
 mod street_plan;
 mod tensor_field;
+mod triangulation;
 
 #[tokio::main]
 async fn main() {
@@ -132,23 +135,46 @@ async fn main() {
 
     let faces = path_to_graph(&all_curves, 15.0, 20.0);
 
-    let mut output = std::fs::File::create("./out.txt").unwrap();
+    // let mut output = std::fs::File::create("./out.txt").unwrap();
 
     dbg!(faces.len());
-    for (i, face) in faces.into_iter().enumerate() {
+    /* for (i, face) in faces.into_iter().enumerate() {
         if i % 5000 == 0 {
             output.write("\n".as_bytes()).unwrap();
         }
-        output.write_all(
-            format!(
-                "polygon({:?}),",
-                face.iter()
-                    .map(|vertex| (vertex.x, vertex.y))
-                    .collect::<Vec<_>>()
+        output
+            .write_all(
+                format!(
+                    "polygon({:?}),",
+                    face.iter()
+                        .map(|vertex| (vertex.x, vertex.y))
+                        .collect::<Vec<_>>()
+                )
+                .as_bytes(),
             )
-            .as_bytes(),
-        ).unwrap();
-    }
+            .unwrap();
+    } */
+
+    /* let temp_faces = vec![vec![
+        Point::new(0.0, 0.0),
+        Point::new(1.0, 0.0),
+        Point::new(1.0, 1.0),
+        Point::new(0.0, 1.0),
+    ]]; */
+
+    let triangulated_faces = triangulate_faces(&faces);
+    let verts_for_triangulation: Vec<Vertex> = faces
+        .into_iter()
+        .flatten()
+        .map(|point| Vertex {
+            pos: [
+                2.0 * point.x / GRID_SIZE as f32 - 1.0,
+                2.0 * point.y / GRID_SIZE as f32 - 1.0,
+                0.1,
+            ],
+            col: [0.0, 1.0, 0.0, 1.0],
+        })
+        .collect();
 
     let mut engine = v4::V4::builder()
         .features(wgpu::Features::POLYGON_MODE_LINE | wgpu::Features::POLYGON_MODE_POINT)
@@ -245,19 +271,19 @@ async fn main() {
                 MeshComponent(
                     vertices: vec![vec![
                         TexVertex {
-                            pos: [-1.0, 1.0, 0.1],
+                            pos: [-1.0, 1.0, 0.2],
                             tex_coords: [0.0, 1.0]
                         },
                         TexVertex {
-                            pos: [-1.0, -1.0, 0.1],
+                            pos: [-1.0, -1.0, 0.2],
                             tex_coords: [0.0, 0.0]
                         },
                         TexVertex {
-                            pos: [1.0, -1.0, 0.1],
+                            pos: [1.0, -1.0, 0.2],
                             tex_coords: [1.0, 0.0]
                         },
                         TexVertex {
-                            pos: [1.0, 1.0, 0.1],
+                            pos: [1.0, 1.0, 0.2],
                             tex_coords: [1.0, 1.0]
                         },
                     ]],
@@ -319,6 +345,24 @@ async fn main() {
                             }).collect::<Vec<_>>()
                         }).collect(),
                     enabled_models: minor_network.iter().enumerate().map(|(i, _)| (i, None)).collect()
+                )
+            ]
+        },
+        "plots" = {
+            material: {
+                pipeline: {
+                    vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
+                    fragment_shader_path: "./shaders/visualizer_fragment.wgsl",
+                    vertex_layouts: [Vertex::vertex_layout()],
+                    uses_camera: false,
+                    ident: "network_pipeline",
+                }
+            },
+            components: [
+                MeshComponent(
+                    vertices: vec![verts_for_triangulation],
+                    indices: vec![triangulated_faces],
+                    enabled_models: vec![(0, None)]
                 )
             ]
         }

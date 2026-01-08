@@ -1019,7 +1019,7 @@ fn list_segments_and_the_points_that_intersect_them(
         }
     }
 
-    segments
+    /* segments
         .iter()
         .for_each(|&[p_0, p_1]| println!("polygon({:?}, {:?})", (p_0.x, p_0.y), (p_1.x, p_1.y)));
     println!(
@@ -1029,7 +1029,7 @@ fn list_segments_and_the_points_that_intersect_them(
             .map(|x| (x.position().x, x.position().y))
             .collect::<Vec<_>>()
     );
-    println!("{:?}", points_on_each_segment);
+    println!("{:?}", points_on_each_segment); */
 
     points_on_each_segment
 }
