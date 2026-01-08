@@ -300,7 +300,7 @@ async fn main() {
                     vertex_layouts: [Vertex::vertex_layout()],
                     uses_camera: false,
                     geometry_details: {
-                        topology: wgpu::PrimitiveTopology::LineStrip,
+                        topology: wgpu::PrimitiveTopology::LineList,
                         polygon_mode: wgpu::PolygonMode::Line,
                     },
                     ident: "network_pipeline",
@@ -309,19 +309,29 @@ async fn main() {
             components: [
                 MeshComponent(
                     vertices:
-                        major_network.iter().map(|arr| {
-                            arr.iter().map(|vec| {
+                        vec![major_network.iter().flat_map(|arr| {
+                            (0..arr.len() - 1).flat_map(|i| {
+                                [
                                     Vertex {
                                         pos: [
-                                            2.0 * vec.x / GRID_SIZE as f32 - 1.0,
-                                            2.0 * vec.y / GRID_SIZE as f32 - 1.0,
+                                            2.0 * arr[i].x / GRID_SIZE as f32 - 1.0,
+                                            2.0 * arr[i].y / GRID_SIZE as f32 - 1.0,
+                                            0.0,
+                                        ],
+                                        col: [0.0, 0.0, 1.0, 1.0]
+                                    },
+                                    Vertex {
+                                        pos: [
+                                            2.0 * arr[i + 1].x / GRID_SIZE as f32 - 1.0,
+                                            2.0 * arr[i + 1].y / GRID_SIZE as f32 - 1.0,
                                             0.0,
                                         ],
                                         col: [0.0, 0.0, 1.0, 1.0]
                                     }
-                            }).collect::<Vec<_>>()
-                        }).collect(),
-                    enabled_models: major_network.iter().enumerate().map(|(i, _)| (i, None)).collect()
+                                ]
+                            })
+                        }).collect()],
+                    enabled_models: vec![(0, None)]
                 )
             ]
         },
@@ -332,19 +342,29 @@ async fn main() {
             components: [
                 MeshComponent(
                     vertices:
-                        minor_network.iter().map(|arr| {
-                            arr.iter().map(|vec| {
+                        vec![minor_network.iter().flat_map(|arr| {
+                            (0..arr.len() - 1).flat_map(|i| {
+                                [
                                     Vertex {
                                         pos: [
-                                            2.0 * vec.x / GRID_SIZE as f32 - 1.0,
-                                            2.0 * vec.y / GRID_SIZE as f32 - 1.0,
+                                            2.0 * arr[i].x / GRID_SIZE as f32 - 1.0,
+                                            2.0 * arr[i].y / GRID_SIZE as f32 - 1.0,
+                                            0.0,
+                                        ],
+                                        col: [1.0, 0.0, 0.0, 1.0]
+                                    },
+                                    Vertex {
+                                        pos: [
+                                            2.0 * arr[i + 1].x / GRID_SIZE as f32 - 1.0,
+                                            2.0 * arr[i + 1].y / GRID_SIZE as f32 - 1.0,
                                             0.0,
                                         ],
                                         col: [1.0, 0.0, 0.0, 1.0]
                                     }
-                            }).collect::<Vec<_>>()
-                        }).collect(),
-                    enabled_models: minor_network.iter().enumerate().map(|(i, _)| (i, None)).collect()
+                                ]
+                            })
+                        }).collect()],
+                    enabled_models: vec![(0, None)]
                 )
             ]
         },
