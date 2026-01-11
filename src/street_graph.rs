@@ -667,7 +667,7 @@ fn cross_2d(p_0: Point, p_1: Point) -> f32 {
     p_0.x * p_1.y - p_0.y * p_1.x
 }
 
-fn calc_intersection_point(segment_0: Segment, segment_1: Segment) -> Option<Point> {
+pub fn calc_intersection_point(segment_0: Segment, segment_1: Segment) -> Option<Point> {
     let p = segment_0[0];
     let q = segment_1[0];
     let r = segment_0[1];

@@ -1,5 +1,3 @@
-use std::io::Write;
-
 use image::{EncodableLayout, ImageBuffer};
 use nalgebra::Vector2;
 use rayon::prelude::*;
@@ -17,6 +15,7 @@ use crate::triangulation::triangulate_faces;
 
 mod building_generation;
 mod event_queue;
+mod intersections;
 mod status;
 mod street_graph;
 mod street_plan;
