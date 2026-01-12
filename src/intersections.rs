@@ -1,8 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+use cool_utils::data_structures::rbtree::RBTree;
+use nalgebra::Vector2;
+use ordered_float::OrderedFloat;
 
 use crate::{
     Point,
-    street_graph::{IntersectionPoint, calc_intersection_point},
+    street_graph::{Segment, calc_intersection_point},
     street_plan::{HermiteCurve, resample_curve},
 };
 
@@ -11,7 +15,7 @@ struct AABB {
     bottom_left: Point,
     left: Option<Box<AABB>>,
     right: Option<Box<AABB>>,
-    curve: (usize, HermiteCurve),
+    segment: Option<(usize, Segment)>,
 }
 
 impl AABB {
@@ -20,14 +24,14 @@ impl AABB {
         bottom_left: Point,
         left: Option<Box<AABB>>,
         right: Option<Box<AABB>>,
-        curve: (usize, HermiteCurve),
+        curve: Option<(usize, Segment)>,
     ) -> AABB {
         AABB {
             top_right,
             bottom_left,
             left,
             right,
-            curve,
+            segment: curve,
         }
     }
 
@@ -42,65 +46,45 @@ impl AABB {
         x_overlap && y_overlap
     }
 
-    fn path_intersection(&self, other: &AABB, resolution: i32) -> Vec<IntersectionPoint> {
-        let self_samples = resample_curve(&self.curve.1, resolution);
-        let other_samples = resample_curve(&other.curve.1, resolution);
-
-        (0..self_samples.len() - 1)
-            .flat_map(|segment_index| {
-                let self_segment = [self_samples[segment_index], self_samples[segment_index + 1]];
-
-                (0..other_samples.len() - 1)
-                    .flat_map(|other_segment_index| {
-                        let other_segment = [
-                            other_samples[other_segment_index],
-                            other_samples[other_segment_index + 1],
-                        ];
-                        calc_intersection_point(self_segment, other_segment).map(|point| {
-                            IntersectionPoint {
-                                position: point,
-                                intersecting_segment_indices: vec![self.curve.0, other.curve.0],
-                            }
-                        })
-                    })
-                    .collect::<Vec<IntersectionPoint>>()
-            })
-            .collect()
+    fn path_intersection(&self, other: &AABB) -> Option<Point> {
+        println!(
+            "Self: {:?}, other: {:?}",
+            self.segment.unwrap(),
+            other.segment.unwrap()
+        );
+        let temp = calc_intersection_point(self.segment.unwrap().1, other.segment.unwrap().1);
+        println!("Intersection: {temp:?}");
+        temp
     }
 
     fn is_leaf(&self) -> bool {
-        !self.curve.1.is_empty()
+        self.segment.is_some()
     }
 }
 
-fn construct_bvh_tree(curves: &[HermiteCurve]) -> AABB {
-    let dimensions: Vec<(usize, [Point; 2])> = curves
+fn construct_bvh_tree(segments: &[Segment]) -> AABB {
+    let dimensions: Vec<(usize, [Point; 2])> = segments
         .iter()
         .enumerate()
-        .map(|(i, curve)| {
-            let samples = resample_curve(curve, 5);
-
+        .map(|(i, segment)| {
             let top_right = Point::new(
-                samples.iter().max_by(|a, b| a.x.total_cmp(&b.x)).unwrap().x,
-                samples.iter().max_by(|a, b| a.y.total_cmp(&b.y)).unwrap().y,
+                segment[0].x.max(segment[1].x),
+                segment[0].y.max(segment[1].y),
             );
 
             let bottom_left = Point::new(
-                samples.iter().min_by(|a, b| a.x.total_cmp(&b.x)).unwrap().x,
-                samples.iter().min_by(|a, b| a.y.total_cmp(&b.y)).unwrap().y,
+                segment[0].x.min(segment[1].x),
+                segment[0].y.min(segment[1].y),
             );
 
             (i, [top_right, bottom_left])
         })
         .collect();
 
-    construct_bounding_boxes(curves, &dimensions)
+    construct_bounding_boxes(segments, &dimensions)
 }
 
-fn construct_bounding_boxes<'a>(
-    curves: &[HermiteCurve],
-    dimensions: &[(usize, [Point; 2])],
-) -> AABB {
+fn construct_bounding_boxes<'a>(curves: &[Segment], dimensions: &[(usize, [Point; 2])]) -> AABB {
     let top_right = Point::new(
         dimensions
             .iter()
@@ -137,7 +121,7 @@ fn construct_bounding_boxes<'a>(
             bottom_left,
             None,
             None,
-            (dimensions[0].0, curves[dimensions[0].0].clone()),
+            Some((dimensions[0].0, curves[dimensions[0].0].clone())),
         )
     } else {
         let is_x_length_larger = top_right.x - bottom_left.x > top_right.y - bottom_left.y;
@@ -160,177 +144,222 @@ fn construct_bounding_boxes<'a>(
             bottom_left,
             Some(Box::new(left)),
             Some(Box::new(right)),
-            (usize::MAX, Vec::new()),
+            None,
         )
     }
 }
+
+fn get_nearest_intersection_point<'a>(
+    target: Point,
+    x_search: &'a mut RBTree<OrderedFloat<f32>>,
+    y_search: &'a mut RBTree<OrderedFloat<f32>>,
+    intersections: &'a mut HashMap<Vector2<OrderedFloat<f32>>, Vec<usize>>,
+    threshold: f32,
+) -> &'a mut Vec<usize> {
+    let ordered_target = Vector2::new(OrderedFloat(target.x), OrderedFloat(target.y));
+    if let Some(x_res) = x_search.get_nearest(&ordered_target.x)
+        && let Some(y_res) = y_search.get_nearest(&ordered_target.y)
+        && intersections.contains_key(&Vector2::new(*x_res, *y_res))
+        && (Point::new(**x_res, **y_res) - &target).norm_squared() <= threshold
+    {
+        intersections
+            .get_mut(&Vector2::new(*x_res, *y_res))
+            .unwrap()
+    } else {
+        intersections.insert(ordered_target, Vec::new());
+        x_search.insert(ordered_target.x);
+        y_search.insert(ordered_target.y);
+        intersections.get_mut(&ordered_target).unwrap()
+    }
+}
+
+pub type Intersections = HashMap<Vector2<OrderedFloat<f32>>, Vec<usize>>;
 
 fn find_bvh_intersections_helper(
     left: &AABB,
     right: &AABB,
     checked_pairs: &mut HashSet<(usize, usize)>,
-) -> Vec<IntersectionPoint> {
+    x_search: &mut RBTree<OrderedFloat<f32>>,
+    y_search: &mut RBTree<OrderedFloat<f32>>,
+    intersections: &mut Intersections,
+    merging_threshold: f32,
+) {
     if !left.box_intersection(right) {
-        return Vec::new();
+        return;
     }
 
-    if left.is_leaf() && right.is_leaf() {
+    if let Some(left_segment) = left.segment
+        && let Some(right_segment) = right.segment
+    {
         let current_pair = (
-            left.curve.0.min(right.curve.0),
-            left.curve.0.max(right.curve.0),
+            left_segment.0.min(right_segment.0),
+            left_segment.0.max(right_segment.0),
         );
         if !checked_pairs.contains(&current_pair) {
             checked_pairs.insert(current_pair);
-            left.path_intersection(right, 10)
-        } else {
-            Vec::new()
+            if let Some(intersection_point) = left.path_intersection(right) {
+                let intersecting_segments = get_nearest_intersection_point(
+                    intersection_point,
+                    x_search,
+                    y_search,
+                    intersections,
+                    merging_threshold,
+                );
+                let intersecting_segments_set: HashSet<usize> =
+                    HashSet::from_iter(intersecting_segments.clone());
+                if !intersecting_segments_set.contains(&left_segment.0) {
+                    intersecting_segments.push(left_segment.0);
+                }
+                if !intersecting_segments_set.contains(&right_segment.0) {
+                    intersecting_segments.push(right_segment.0);
+                }
+            }
         }
-    } else if left.is_leaf() && !right.is_leaf() {
-        find_bvh_intersections_helper(left, right.left.as_ref().unwrap(), checked_pairs)
-            .into_iter()
-            .chain(find_bvh_intersections_helper(
-                left,
-                right.right.as_ref().unwrap(),
-                checked_pairs,
-            ))
-            .collect()
-    } else if !left.is_leaf() && right.is_leaf() {
-        find_bvh_intersections_helper(left.left.as_ref().unwrap(), right, checked_pairs)
-            .into_iter()
-            .chain(find_bvh_intersections_helper(
-                left.right.as_ref().unwrap(),
-                right,
-                checked_pairs,
-            ))
-            .collect()
     } else {
-        find_bvh_intersections_helper(
-            left.left.as_ref().unwrap(),
-            right.left.as_ref().unwrap(),
-            checked_pairs,
-        )
-        .into_iter()
-        .chain(find_bvh_intersections_helper(
-            left.left.as_ref().unwrap(),
-            right.right.as_ref().unwrap(),
-            checked_pairs,
-        ))
-        .chain(find_bvh_intersections_helper(
-            left.right.as_ref().unwrap(),
-            right.left.as_ref().unwrap(),
-            checked_pairs,
-        ))
-        .chain(find_bvh_intersections_helper(
-            left.right.as_ref().unwrap(),
-            right.right.as_ref().unwrap(),
-            checked_pairs,
-        ))
-        .collect()
+        let intersection_test_pairs: Vec<[&AABB; 2]> = if left.is_leaf() {
+            vec![
+                [left, right.left.as_ref().unwrap()],
+                [left, right.right.as_ref().unwrap()],
+            ]
+        } else if right.is_leaf() {
+            vec![
+                [left.left.as_ref().unwrap(), right],
+                [left.right.as_ref().unwrap(), right],
+            ]
+        } else {
+            vec![
+                [left.left.as_ref().unwrap(), right.left.as_ref().unwrap()],
+                [left.left.as_ref().unwrap(), right.right.as_ref().unwrap()],
+                [left.right.as_ref().unwrap(), right.left.as_ref().unwrap()],
+                [left.right.as_ref().unwrap(), right.right.as_ref().unwrap()],
+            ]
+        };
+
+        for pair in intersection_test_pairs {
+            find_bvh_intersections_helper(
+                pair[0],
+                pair[1],
+                checked_pairs,
+                x_search,
+                y_search,
+                intersections,
+                merging_threshold,
+            );
+        }
     }
 }
 
-fn find_intersections(curves: &[HermiteCurve]) -> Vec<IntersectionPoint> {
-    let bvh = construct_bvh_tree(curves);
-    let mut checked_pairs: HashSet<(usize, usize)> = (0..curves.len()).map(|i| (i, i)).collect();
-    find_bvh_intersections_helper(&bvh, &bvh, &mut checked_pairs)
+fn find_segments_intersections(segments: &[Segment], merging_threshold: f32) -> Intersections {
+    let bvh = construct_bvh_tree(segments);
+    let mut checked_pairs: HashSet<(usize, usize)> = (0..segments.len()).map(|i| (i, i)).collect();
+    let mut x_search: RBTree<OrderedFloat<f32>> = RBTree::new();
+    let mut y_search: RBTree<OrderedFloat<f32>> = RBTree::new();
+    let mut intersections: HashMap<Vector2<OrderedFloat<f32>>, Vec<usize>> = HashMap::new();
+
+    find_bvh_intersections_helper(
+        &bvh,
+        &bvh,
+        &mut checked_pairs,
+        &mut x_search,
+        &mut y_search,
+        &mut intersections,
+        merging_threshold,
+    );
+
+    intersections
+}
+
+fn find_curves_intersections(
+    curves: &[HermiteCurve],
+    resample_resolution: u32,
+    merging_threshold: f32,
+) -> Intersections {
+    let samples: Vec<Vec<Point>> = curves
+        .iter()
+        .map(|curve| resample_curve(&curve, resample_resolution))
+        .collect();
+    let segmented_curves: Vec<Segment> = samples
+        .into_iter()
+        .flat_map(|curve| {
+            (0..curve.len() - 1)
+                .map(|i| [curve[i], curve[i + 1]])
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    find_segments_intersections(&segmented_curves, merging_threshold)
 }
 
 #[cfg(test)]
 mod test {
     use std::collections::HashSet;
 
+    use nalgebra::Vector2;
+    use ordered_float::OrderedFloat;
+
     use crate::{
-        intersections::find_intersections, street_graph::points_are_close,
-        street_plan::ControlPoint, tensor_field::Point,
+        intersections::{Intersections, find_segments_intersections},
+        street_graph::points_are_close,
+        tensor_field::Point,
     };
+
+    fn assert_intersection_maps_eq(test: &Intersections, expected: &Intersections) {
+        assert_eq!(test.len(), expected.len());
+        let expected_key_value_pairs: Vec<(Point, HashSet<usize>)> = expected
+            .iter()
+            .map(|(key, val)| (Point::new(*key.x, *key.y), HashSet::from_iter(val.clone())))
+            .collect();
+        for key in test.keys() {
+            println!(
+                "{key}, value: {:?}, expected: {expected_key_value_pairs:?}",
+                &test[key]
+            );
+            assert!(
+                expected_key_value_pairs
+                    .iter()
+                    .any(|(expected_key, expected_value)| {
+                        println!("Close: {:?}", (key.map(|x| *x), *expected_key));
+                        points_are_close(key.map(|x| *x), *expected_key)
+                            && expected_value.len() == test[key].len()
+                            && expected_value
+                                .difference(&HashSet::from_iter(test[key].clone()))
+                                .count()
+                                == 0
+                    })
+            );
+        }
+    }
 
     #[test]
     fn simple_bvh_intersection() {
-        let curves = vec![
-            vec![
-                ControlPoint {
-                    position: Point::new(2.0, 0.0),
-                    velocity: Point::new(1.15, 2.23),
-                },
-                ControlPoint {
-                    position: Point::new(0.466, 3.273),
-                    velocity: Point::new(1.066, 4.073),
-                },
-            ],
-            vec![
-                ControlPoint {
-                    position: Point::new(0.0, 1.0),
-                    velocity: Point::new(0.41, -1.165),
-                },
-                ControlPoint {
-                    position: Point::new(1.817, 1.44),
-                    velocity: Point::new(0.927, -0.61),
-                },
-            ],
+        let segments = vec![
+            [Point::new(2.0, 0.0), Point::new(0.466, 3.273)],
+            [Point::new(0.0, 1.0), Point::new(1.817, 1.44)],
         ];
 
-        let intersections = find_intersections(&curves);
-        assert_eq!(intersections.len(), 1);
-        assert!(points_are_close(
-            intersections[0].position(),
-            Point::new(1.29047, 1.3516)
-        ));
-        assert_eq!(intersections[0].intersecting_segment_indices.len(), 2);
-        assert_eq!(
-            HashSet::from_iter(intersections[0].intersecting_segment_indices.clone())
-                .difference(&HashSet::<usize>::from_iter(vec![0, 1]))
-                .count(),
-            0
+        let intersections = find_segments_intersections(&segments, 0.0001);
+        let mut expected_intersections = Intersections::new();
+        expected_intersections.insert(
+            Vector2::new(OrderedFloat(1.3752345), OrderedFloat(1.3330231)),
+            vec![0, 1],
         );
+        assert_intersection_maps_eq(&intersections, &expected_intersections);
     }
 
     #[test]
     fn bvh_triple_intersection() {
         let curves = vec![
-            vec![
-                ControlPoint {
-                    position: Point::new(2.0, 0.0),
-                    velocity: Point::new(1.15, 2.23),
-                },
-                ControlPoint {
-                    position: Point::new(0.466, 3.273),
-                    velocity: Point::new(1.066, 4.073),
-                },
-            ],
-            vec![
-                ControlPoint {
-                    position: Point::new(0.0, 1.0),
-                    velocity: Point::new(0.41, -1.165),
-                },
-                ControlPoint {
-                    position: Point::new(1.817, 1.44),
-                    velocity: Point::new(0.927, -0.61),
-                },
-            ],
-            vec![
-                ControlPoint {
-                    position: Point::new(1.29047, 2.0),
-                    velocity: Point::new(0.0, -1.0),
-                },
-                ControlPoint {
-                    position: Point::new(1.29047, 0.0),
-                    velocity: Point::new(0.0, -1.0),
-                },
-            ]
+            [Point::new(2.0, 0.0), Point::new(0.466, 3.273)],
+            [Point::new(0.0, 1.0), Point::new(1.817, 1.44)],
+            [Point::new(1.3752345, 2.0), Point::new(1.3752345, 0.0)],
         ];
 
-        let intersections = find_intersections(&curves);
-        assert_eq!(intersections.len(), 1);
-        assert!(points_are_close(
-            intersections[0].position(),
-            Point::new(1.29047, 1.3516)
-        ));
-        assert_eq!(intersections[0].intersecting_segment_indices.len(), 3);
-        assert_eq!(
-            HashSet::from_iter(intersections[0].intersecting_segment_indices.clone())
-                .difference(&HashSet::<usize>::from_iter(vec![0, 1, 2]))
-                .count(),
-            0
+        let intersections = find_segments_intersections(&curves, 0.0001);
+        let mut expected_intersections = Intersections::new();
+        expected_intersections.insert(
+            Vector2::new(OrderedFloat(1.3752345), OrderedFloat(1.3330231)),
+            vec![0, 1, 2],
         );
+        assert_intersection_maps_eq(&intersections, &expected_intersections);
     }
 }

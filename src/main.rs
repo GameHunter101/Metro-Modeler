@@ -252,16 +252,15 @@ async fn main() {
                 },
                 attachments: [
                     Texture(
-                    texture: v4::ecs::material::GeneralTexture::Regular(
-                        Texture::from_bytes(
-                            norm_tex.as_bytes(),
-                            (GRID_SIZE, GRID_SIZE),
-                            device,
-                            queue,
-                            wgpu::TextureFormat::Rgba8Unorm,
-                            false,
-                            true,
-                        )
+                    texture: Texture::from_bytes(
+                        norm_tex.as_bytes(),
+                        (GRID_SIZE, GRID_SIZE),
+                        device,
+                        queue,
+                        wgpu::TextureFormat::Rgba8Unorm,
+                        None,
+                        false,
+                        wgpu::TextureUsages::empty(),
                     ),
                     visibility: wgpu::ShaderStages::FRAGMENT,
                 )],
