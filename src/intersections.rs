@@ -6,7 +6,7 @@ use ordered_float::OrderedFloat;
 
 use crate::{
     Point,
-    street_graph::{Segment, calc_intersection_point},
+    street_graph::{Segment, calc_intersection_point_with_tolerance},
     street_plan::{HermiteCurve, resample_curve},
 };
 
@@ -52,7 +52,11 @@ impl AABB {
             self.segment.unwrap(),
             other.segment.unwrap()
         );
-        let temp = calc_intersection_point(self.segment.unwrap().1, other.segment.unwrap().1);
+        let temp = calc_intersection_point_with_tolerance(
+            self.segment.unwrap().1,
+            other.segment.unwrap().1,
+            0.001,
+        );
         println!("Intersection: {temp:?}");
         temp
     }
@@ -249,12 +253,39 @@ fn find_bvh_intersections_helper(
     }
 }
 
-fn find_segments_intersections(segments: &[Segment], merging_threshold: f32) -> Intersections {
+pub fn find_segments_intersections(
+    segments: &[Segment],
+    merging_threshold: f32,
+    include_all_endpoints: bool,
+) -> Intersections {
     let bvh = construct_bvh_tree(segments);
     let mut checked_pairs: HashSet<(usize, usize)> = (0..segments.len()).map(|i| (i, i)).collect();
     let mut x_search: RBTree<OrderedFloat<f32>> = RBTree::new();
     let mut y_search: RBTree<OrderedFloat<f32>> = RBTree::new();
     let mut intersections: HashMap<Vector2<OrderedFloat<f32>>, Vec<usize>> = HashMap::new();
+
+    if include_all_endpoints {
+        for (i, segment) in segments.iter().enumerate() {
+            let ordered_point_0 =
+                Vector2::new(OrderedFloat(segment[0].x), OrderedFloat(segment[0].y));
+            let ordered_point_1 =
+                Vector2::new(OrderedFloat(segment[1].x), OrderedFloat(segment[1].y));
+            x_search.insert(ordered_point_0.x);
+            y_search.insert(ordered_point_0.y);
+            x_search.insert(ordered_point_1.x);
+            y_search.insert(ordered_point_1.y);
+            if let Some(point_0_intersections) = intersections.get_mut(&ordered_point_0) {
+                point_0_intersections.push(i);
+            } else {
+                intersections.insert(ordered_point_0, vec![i]);
+            }
+            if let Some(point_1_intersections) = intersections.get_mut(&ordered_point_1) {
+                point_1_intersections.push(i);
+            } else {
+                intersections.insert(ordered_point_1, vec![i]);
+            }
+        }
+    }
 
     find_bvh_intersections_helper(
         &bvh,
@@ -269,10 +300,11 @@ fn find_segments_intersections(segments: &[Segment], merging_threshold: f32) -> 
     intersections
 }
 
-fn find_curves_intersections(
+pub fn find_curves_intersections(
     curves: &[HermiteCurve],
     resample_resolution: u32,
     merging_threshold: f32,
+    include_all_endpoints: bool,
 ) -> Intersections {
     let samples: Vec<Vec<Point>> = curves
         .iter()
@@ -287,7 +319,7 @@ fn find_curves_intersections(
         })
         .collect();
 
-    find_segments_intersections(&segmented_curves, merging_threshold)
+    find_segments_intersections(&segmented_curves, merging_threshold, include_all_endpoints)
 }
 
 #[cfg(test)]
@@ -298,7 +330,7 @@ mod test {
     use ordered_float::OrderedFloat;
 
     use crate::{
-        intersections::{Intersections, find_segments_intersections},
+        intersections::{AABB, Intersections, find_segments_intersections},
         street_graph::points_are_close,
         tensor_field::Point,
     };
@@ -331,13 +363,53 @@ mod test {
     }
 
     #[test]
+    fn box_tr_bl_intersection() {
+        let a = AABB::new(Point::new(2.0, 2.0), Point::new(1.0, 1.0), None, None, None);
+        let b = AABB::new(Point::new(3.0, 3.0), Point::new(1.5, 1.5), None, None, None);
+        assert!(a.box_intersection(&b));
+        assert!(b.box_intersection(&a));
+    }
+
+    #[test]
+    fn box_tl_br_intersection() {
+        let a = AABB::new(Point::new(2.0, 2.0), Point::new(1.0, 1.0), None, None, None);
+        let b = AABB::new(Point::new(1.5, 2.5), Point::new(0.5, 1.5), None, None, None);
+        assert!(a.box_intersection(&b));
+        assert!(b.box_intersection(&a));
+    }
+
+    #[test]
+    fn box_enveloped_intersection() {
+        let a = AABB::new(Point::new(2.0, 2.0), Point::new(1.0, 1.0), None, None, None);
+        let b = AABB::new(Point::new(1.5, 1.5), Point::new(1.1, 1.1), None, None, None);
+        assert!(a.box_intersection(&b));
+        assert!(b.box_intersection(&a));
+    }
+
+    #[test]
+    fn box_side_intersection() {
+        let a = AABB::new(Point::new(2.0, 2.0), Point::new(1.0, 1.0), None, None, None);
+        let b = AABB::new(Point::new(3.0, 3.0), Point::new(1.5, 0.0), None, None, None);
+        assert!(a.box_intersection(&b));
+        assert!(b.box_intersection(&a));
+    }
+
+    #[test]
+    fn box_no_thickness_intersection() {
+        let a = AABB::new(Point::new(2.0, 2.0), Point::new(1.0, 2.0), None, None, None);
+        let b = AABB::new(Point::new(1.5, 3.0), Point::new(1.5, 0.0), None, None, None);
+        assert!(a.box_intersection(&b));
+        assert!(b.box_intersection(&a));
+    }
+
+    #[test]
     fn simple_bvh_intersection() {
         let segments = vec![
             [Point::new(2.0, 0.0), Point::new(0.466, 3.273)],
             [Point::new(0.0, 1.0), Point::new(1.817, 1.44)],
         ];
 
-        let intersections = find_segments_intersections(&segments, 0.0001);
+        let intersections = find_segments_intersections(&segments, 0.0001, false);
         let mut expected_intersections = Intersections::new();
         expected_intersections.insert(
             Vector2::new(OrderedFloat(1.3752345), OrderedFloat(1.3330231)),
@@ -348,18 +420,99 @@ mod test {
 
     #[test]
     fn bvh_triple_intersection() {
-        let curves = vec![
+        let segments = vec![
             [Point::new(2.0, 0.0), Point::new(0.466, 3.273)],
             [Point::new(0.0, 1.0), Point::new(1.817, 1.44)],
             [Point::new(1.3752345, 2.0), Point::new(1.3752345, 0.0)],
         ];
 
-        let intersections = find_segments_intersections(&curves, 0.0001);
+        let intersections = find_segments_intersections(&segments, 0.0001, false);
         let mut expected_intersections = Intersections::new();
         expected_intersections.insert(
             Vector2::new(OrderedFloat(1.3752345), OrderedFloat(1.3330231)),
             vec![0, 1, 2],
         );
+        assert_intersection_maps_eq(&intersections, &expected_intersections);
+    }
+
+    #[test]
+    fn chained_segment_bvh_intersections() {
+        let segments = vec![
+            [Point::new(0.97, 0.58), Point::new(2.52, 1.66)],
+            [Point::new(2.52, 1.66), Point::new(3.89, 0.38)],
+            [Point::new(1.07, 1.28), Point::new(4.94, 0.56)],
+        ];
+
+        let intersections = find_segments_intersections(&segments, 0.0001, true);
+        let mut expected_intersections = Intersections::new();
+        expected_intersections.insert(
+            Vector2::new(OrderedFloat(1.78399), OrderedFloat(1.14717)),
+            vec![0, 2],
+        );
+        expected_intersections.insert(
+            Vector2::new(OrderedFloat(3.38837), OrderedFloat(0.84868)),
+            vec![1, 2],
+        );
+        expected_intersections.insert(
+            Vector2::new(OrderedFloat(2.52), OrderedFloat(1.66)),
+            vec![0, 1],
+        );
+
+        expected_intersections.insert(
+            Vector2::new(OrderedFloat(0.97), OrderedFloat(0.58)),
+            vec![0],
+        );
+
+        expected_intersections.insert(
+            Vector2::new(OrderedFloat(3.89), OrderedFloat(0.38)),
+            vec![1],
+        );
+
+        expected_intersections.insert(
+            Vector2::new(OrderedFloat(1.07), OrderedFloat(1.28)),
+            vec![2],
+        );
+
+        expected_intersections.insert(
+            Vector2::new(OrderedFloat(4.94), OrderedFloat(0.56)),
+            vec![2],
+        );
+
+        assert_intersection_maps_eq(&intersections, &expected_intersections);
+    }
+
+    #[test]
+    fn bvh_intersection_tolerance() {
+        let segments = vec![
+            [
+                Point::new(84.59501, 327.1706),
+                Point::new(69.01391, 312.52502),
+            ],
+            [
+                Point::new(106.17567, 303.3888),
+                Point::new(80.89961, 331.2429),
+            ],
+        ];
+
+        let intersections = find_segments_intersections(&segments, 0.0001, true);
+        let mut expected_intersections = Intersections::new();
+        expected_intersections.insert(
+            Vector2::new(OrderedFloat(69.01391), OrderedFloat(312.52502)),
+            vec![0],
+        );
+        expected_intersections.insert(
+            Vector2::new(OrderedFloat(106.17567), OrderedFloat(303.3888)),
+            vec![1],
+        );
+        expected_intersections.insert(
+            Vector2::new(OrderedFloat(80.89961), OrderedFloat(331.2429)),
+            vec![1],
+        );
+        expected_intersections.insert(
+            Vector2::new(OrderedFloat(84.59501), OrderedFloat(327.1706)),
+            vec![0, 1],
+        );
+        // println!("Intersections: {:?}", intersections.keys().map(|point| (*point.x, *point.y)).collect::<Vec<_>>());
         assert_intersection_maps_eq(&intersections, &expected_intersections);
     }
 }

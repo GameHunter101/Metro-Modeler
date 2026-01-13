@@ -8,6 +8,7 @@ use nalgebra::{Matrix2, Vector2};
 use ordered_float::OrderedFloat;
 
 use crate::event_queue::EventQueue;
+use crate::intersections::find_segments_intersections;
 use crate::status::{SkipList, get_x_val_of_segment_at_height};
 use crate::street_plan::HermiteCurve;
 use crate::tensor_field::Point;
@@ -684,6 +685,36 @@ pub fn calc_intersection_point(segment_0: Segment, segment_1: Segment) -> Option
     }
 }
 
+pub fn calc_intersection_point_with_tolerance(
+    segment_0: Segment,
+    segment_1: Segment,
+    tolerance: f32,
+) -> Option<Point> {
+    let segment_0_direction = (segment_0[1] - segment_0[0]).normalize();
+    let segment_1_direction = (segment_1[1] - segment_1[0]).normalize();
+
+    let p = segment_0[0] - segment_0_direction * tolerance;
+    let q = segment_1[0] - segment_1_direction * tolerance;
+    let r = segment_0[1] + segment_0_direction * tolerance;
+    let s = segment_1[1] + segment_1_direction * tolerance;
+
+    let denominator = cross_2d(s - q, r - p);
+
+    let u = cross_2d(p - q, s - q) / denominator;
+    let t = cross_2d(p - q, r - p) / denominator;
+    let point = p + u * (r - p);
+    if ((u >= 0.0 && u <= 1.0) && (t >= 0.0 && t <= 1.0))
+        /* || (point - segment_0[0]).norm_squared() < tolerance
+        || (point - segment_0[1]).norm_squared() < tolerance
+        || (point - segment_1[0]).norm_squared() < tolerance
+        || (point - segment_1[1]).norm_squared() < tolerance */
+    {
+        Some(point)
+    } else {
+        None
+    }
+}
+
 fn calc_intersection_point_semi_bounded(segment_0: Segment, segment_1: Segment) -> Option<Point> {
     let p = segment_0[0];
     let q = segment_1[0];
@@ -801,7 +832,7 @@ pub fn path_to_graph(
 type AdjacencyList = HashMap<usize, HashSet<usize>>;
 
 pub fn segments_to_adjacency_list(segments: &mut [Segment]) -> (Vec<Point>, AdjacencyList) {
-    let intersections: HashSet<IntersectionPoint> =
+    /* let intersections: HashSet<IntersectionPoint> =
         HashSet::from_iter(find_intersections(&segments, true));
 
     let mut intersections_vec: Vec<IntersectionPoint> = intersections.iter().cloned().collect();
@@ -810,7 +841,18 @@ pub fn segments_to_adjacency_list(segments: &mut [Segment]) -> (Vec<Point>, Adja
 
     let all_segments: Vec<Segment> = segments.to_vec().into_iter().chain(new_segments).collect();
 
-    vertices_to_adjacency_list(intersections_vec, &all_segments)
+    vertices_to_adjacency_list(intersections_vec, &all_segments) */
+    let intersections = find_segments_intersections(segments, 0.0001, true);
+    intersections
+        .iter()
+        .enumerate()
+        .map(|(i, (point, segments))| {
+            (
+                Point::new(*point.x, *point.y),
+                (i, HashSet::from_iter(segments.clone())),
+            )
+        })
+        .unzip()
 }
 
 pub fn split_segments_at_intersections(
@@ -4007,6 +4049,17 @@ mod test {
         ];
 
         let (vertices, adjacency_list) = segments_to_adjacency_list(&mut segments);
+        println!(
+            "Vertices: {:?} | adjacency list: {:?}",
+            vertices
+                .iter()
+                .map(|vert| (vert.x, vert.y))
+                .collect::<Vec<_>>(),
+            adjacency_list
+                .iter()
+                .map(|(i, arr)| (i, arr.iter().collect::<Vec<_>>()))
+                .collect::<Vec<_>>()
+        );
         let dcel = DCEL::new(&vertices, &adjacency_list);
 
         assert_eq!(dcel.faces().len(), 5);
