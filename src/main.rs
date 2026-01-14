@@ -259,7 +259,7 @@ async fn main() {
                         queue,
                         wgpu::TextureFormat::Rgba8Unorm,
                         None,
-                        false,
+                        true,
                         wgpu::TextureUsages::empty(),
                     ),
                     visibility: wgpu::ShaderStages::FRAGMENT,

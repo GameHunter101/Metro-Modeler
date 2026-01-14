@@ -466,8 +466,8 @@ dependencies = [
 
 [[package]]
 name = "cool_utils"
-version = "0.1.42"
-source = "git+https://github.com/GameHunter101/cool_utils#bb3f081fd8f3c1f08e77ece5fa8e5d73353199af"
+version = "0.1.43"
+source = "git+https://github.com/GameHunter101/cool_utils#1d79b12de56bbfc2f00012770882cad5d4e6074f"
 dependencies = [
  "nalgebra",
  "rand",
@@ -1470,7 +1470,7 @@ dependencies = [
 
 [[package]]
 name = "metro_modeler"
-version = "0.2.21"
+version = "0.2.22"
 dependencies = [
  "async-scoped",
  "bytemuck",

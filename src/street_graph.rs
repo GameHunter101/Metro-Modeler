@@ -685,37 +685,10 @@ pub fn calc_intersection_point(segment_0: Segment, segment_1: Segment) -> Option
     }
 }
 
-pub fn calc_intersection_point_with_tolerance(
+pub fn calc_intersection_point_semi_bounded(
     segment_0: Segment,
     segment_1: Segment,
-    tolerance: f32,
 ) -> Option<Point> {
-    let segment_0_direction = (segment_0[1] - segment_0[0]).normalize();
-    let segment_1_direction = (segment_1[1] - segment_1[0]).normalize();
-
-    let p = segment_0[0] - segment_0_direction * tolerance;
-    let q = segment_1[0] - segment_1_direction * tolerance;
-    let r = segment_0[1] + segment_0_direction * tolerance;
-    let s = segment_1[1] + segment_1_direction * tolerance;
-
-    let denominator = cross_2d(s - q, r - p);
-
-    let u = cross_2d(p - q, s - q) / denominator;
-    let t = cross_2d(p - q, r - p) / denominator;
-    let point = p + u * (r - p);
-    if ((u >= 0.0 && u <= 1.0) && (t >= 0.0 && t <= 1.0))
-        /* || (point - segment_0[0]).norm_squared() < tolerance
-        || (point - segment_0[1]).norm_squared() < tolerance
-        || (point - segment_1[0]).norm_squared() < tolerance
-        || (point - segment_1[1]).norm_squared() < tolerance */
-    {
-        Some(point)
-    } else {
-        None
-    }
-}
-
-fn calc_intersection_point_semi_bounded(segment_0: Segment, segment_1: Segment) -> Option<Point> {
     let p = segment_0[0];
     let q = segment_1[0];
     let r = segment_0[1];
@@ -730,19 +703,17 @@ fn calc_intersection_point_semi_bounded(segment_0: Segment, segment_1: Segment) 
     } else {
         let pos = q + t * (s - q);
         if u < 0.0 || u > 1.0 {
-            let start = segment_start(segment_1);
-            let end = segment_end(segment_1);
+            let start = segment_start(segment_0);
+            let end = segment_end(segment_0);
             if points_are_close(pos, start) || points_are_close(pos, end) {
                 Some(pos)
             } else {
                 None
             }
         } else if t < 0.0 || t > 1.0
-        /* && (points_are_close(pos, segment_start(segment_0))
-        || points_are_close(pos, segment_end(segment_0))) */
         {
-            let start = segment_start(segment_0);
-            let end = segment_end(segment_0);
+            let start = segment_start(segment_1);
+            let end = segment_end(segment_1);
             if points_are_close(pos, start) || points_are_close(pos, end) {
                 Some(pos)
             } else {
@@ -832,27 +803,13 @@ pub fn path_to_graph(
 type AdjacencyList = HashMap<usize, HashSet<usize>>;
 
 pub fn segments_to_adjacency_list(segments: &mut [Segment]) -> (Vec<Point>, AdjacencyList) {
-    /* let intersections: HashSet<IntersectionPoint> =
-        HashSet::from_iter(find_intersections(&segments, true));
-
-    let mut intersections_vec: Vec<IntersectionPoint> = intersections.iter().cloned().collect();
+    let mut intersections_vec = find_segments_intersections(segments, 0.0001, true);
 
     let new_segments = split_segments_at_intersections(&mut intersections_vec, segments);
 
     let all_segments: Vec<Segment> = segments.to_vec().into_iter().chain(new_segments).collect();
 
-    vertices_to_adjacency_list(intersections_vec, &all_segments) */
-    let intersections = find_segments_intersections(segments, 0.0001, true);
-    intersections
-        .iter()
-        .enumerate()
-        .map(|(i, (point, segments))| {
-            (
-                Point::new(*point.x, *point.y),
-                (i, HashSet::from_iter(segments.clone())),
-            )
-        })
-        .unzip()
+    vertices_to_adjacency_list(intersections_vec, &all_segments)
 }
 
 pub fn split_segments_at_intersections(
