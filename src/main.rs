@@ -1,5 +1,3 @@
-use std::io::Write;
-
 use image::{EncodableLayout, ImageBuffer};
 use nalgebra::Vector2;
 use rayon::prelude::*;
@@ -16,8 +14,7 @@ use wgpu::vertex_attr_array;
 use crate::triangulation::triangulate_faces;
 
 mod building_generation;
-mod event_queue;
-mod status;
+mod intersections;
 mod street_graph;
 mod street_plan;
 mod tensor_field;
@@ -253,16 +250,15 @@ async fn main() {
                 },
                 attachments: [
                     Texture(
-                    texture: v4::ecs::material::GeneralTexture::Regular(
-                        Texture::from_bytes(
-                            norm_tex.as_bytes(),
-                            (GRID_SIZE, GRID_SIZE),
-                            device,
-                            queue,
-                            wgpu::TextureFormat::Rgba8Unorm,
-                            false,
-                            true,
-                        )
+                    texture: Texture::from_bytes(
+                        norm_tex.as_bytes(),
+                        (GRID_SIZE, GRID_SIZE),
+                        device,
+                        queue,
+                        wgpu::TextureFormat::Rgba8Unorm,
+                        None,
+                        true,
+                        wgpu::TextureUsages::empty(),
                     ),
                     visibility: wgpu::ShaderStages::FRAGMENT,
                 )],
