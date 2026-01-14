@@ -14,9 +14,7 @@ use wgpu::vertex_attr_array;
 use crate::triangulation::triangulate_faces;
 
 mod building_generation;
-mod event_queue;
 mod intersections;
-mod status;
 mod street_graph;
 mod street_plan;
 mod tensor_field;

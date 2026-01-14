@@ -292,6 +292,7 @@ pub fn find_segments_intersections(
         .collect()
 }
 
+#[allow(unused)]
 pub fn assert_intersections_eq(test: &[IntersectionPoint], expected: &[IntersectionPoint]) {
     assert_eq!(test.len(), expected.len());
     for test_intersection in test {
