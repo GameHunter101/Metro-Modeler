@@ -1,12 +1,14 @@
-use image::{EncodableLayout, ImageBuffer};
 use nalgebra::Vector2;
 use rayon::prelude::*;
 use street_graph::path_to_graph;
 use street_plan::{HermiteCurve, SeedPoint, merge_road_endings, resample_curve, trace_street_plan};
-use tensor_field::{DesignElement, EvalEigenvectors, GRID_SIZE, Point, TensorField};
+use tensor_field::{DesignElement, GRID_SIZE, Point, TensorField};
 use v4::{
-    builtin_components::mesh_component::{MeshComponent, VertexDescriptor},
-    engine_support::texture_support::Texture,
+    builtin_components::{
+        camera_component::CameraComponent,
+        mesh_component::{MeshComponent, VertexDescriptor},
+        transform_component::TransformComponent,
+    },
     scene,
 };
 use wgpu::vertex_attr_array;
@@ -132,43 +134,12 @@ async fn main() {
 
     let faces = path_to_graph(&all_curves, 15.0, 20.0);
 
-    // let mut output = std::fs::File::create("./out.txt").unwrap();
-
-    dbg!(faces.len());
-    /* for (i, face) in faces.into_iter().enumerate() {
-        if i % 5000 == 0 {
-            output.write("\n".as_bytes()).unwrap();
-        }
-        output
-            .write_all(
-                format!(
-                    "polygon({:?}),",
-                    face.iter()
-                        .map(|vertex| (vertex.x, vertex.y))
-                        .collect::<Vec<_>>()
-                )
-                .as_bytes(),
-            )
-            .unwrap();
-    } */
-
-    /* let temp_faces = vec![vec![
-        Point::new(0.0, 0.0),
-        Point::new(1.0, 0.0),
-        Point::new(1.0, 1.0),
-        Point::new(0.0, 1.0),
-    ]]; */
-
     let triangulated_faces = triangulate_faces(&faces);
     let verts_for_triangulation: Vec<Vertex> = faces
         .into_iter()
         .flatten()
         .map(|point| Vertex {
-            pos: [
-                2.0 * point.x / GRID_SIZE as f32 - 1.0,
-                2.0 * point.y / GRID_SIZE as f32 - 1.0,
-                0.1,
-            ],
+            pos: [point.x, 0.0, point.y],
             col: [0.0, 1.0, 0.0, 1.0],
         })
         .collect();
@@ -181,120 +152,21 @@ async fn main() {
             "Visualizer",
             None,
         )
+        .hide_cursor(true)
         .build()
         .await;
 
-    let sample_factor = 14;
-
-    let mut norm_tex = ImageBuffer::new(GRID_SIZE, GRID_SIZE);
-
-    for (x, y, pix) in norm_tex.enumerate_pixels_mut() {
-        let val = (tensor_field
-            .evaluate_smoothed_field_at_point(Vector2::new(x as f32, y as f32))
-            .norm()
-            > 0.0001) as u8
-            * 255;
-        *pix = image::Rgba([val, val, val, 50]);
-    }
-
-    let rendering_manager = engine.rendering_manager();
-    let device = rendering_manager.device();
-    let queue = rendering_manager.queue();
-
-    let vector_opacity = 0.2;
 
     scene! {
         scene: visualizer,
-        "eigenvectors" = {
-            material: {
-                pipeline: {
-                    vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
-                    fragment_shader_path: "./shaders/visualizer_fragment.wgsl",
-                    vertex_layouts: [Vertex::vertex_layout()],
-                    uses_camera: false,
-                    geometry_details: {
-                        topology: wgpu::PrimitiveTopology::LineList,
-                        polygon_mode: wgpu::PolygonMode::Line,
-                    },
-                },
-            },
-            components: [
-                MeshComponent(
-                    vertices: vec![
-                        (0..GRID_SIZE / sample_factor).flat_map(|x| (0..GRID_SIZE / sample_factor).flat_map(|y| {
-                            let point = Vector2::new(x as f32 * sample_factor as f32, y as f32 * sample_factor as f32);
-                            let tensor = tensor_field.evaluate_smoothed_field_at_point(point);
-                            let eigenvectors = tensor.eigenvectors();
-                            let maj = eigenvectors.major.normalize() * (sample_factor - 1) as f32;
-                            let min = eigenvectors.minor.normalize() * (sample_factor - 1) as f32;
-                            let maj_point = normalize_vector(point + maj);
-                            let min_point = normalize_vector(point + min);
-                            let norm_point = normalize_vector(point);
-                            [
-                                Vertex {pos: [norm_point.x, norm_point.y, 0.0], col: [1.0, 0.0, 0.0, vector_opacity]}, Vertex {pos: [maj_point.x, maj_point.y, 0.0], col: [1.0, 0.0, 0.0, vector_opacity]},
-                                Vertex {pos: [norm_point.x, norm_point.y, 0.0], col: [0.0, 1.0, 0.0, vector_opacity]}, Vertex {pos: [min_point.x, min_point.y, 0.0], col: [0.0, 1.0, 0.0, vector_opacity]}
-                            ]
-                        }).collect::<Vec<_>>()).collect()
-                    ],
-                    enabled_models: vec![(0, None)]
-                ),
-            ]
-        },
-        "degenerate_points" = {
-            material: {
-                pipeline: {
-                    vertex_shader_path: "./shaders/degenerate_point_vert.wgsl",
-                    fragment_shader_path: "./shaders/degenerate_point_frag.wgsl",
-                    vertex_layouts: [TexVertex::vertex_layout()],
-                    uses_camera: false,
-                },
-                attachments: [
-                    Texture(
-                    texture: Texture::from_bytes(
-                        norm_tex.as_bytes(),
-                        (GRID_SIZE, GRID_SIZE),
-                        device,
-                        queue,
-                        wgpu::TextureFormat::Rgba8Unorm,
-                        None,
-                        true,
-                        wgpu::TextureUsages::empty(),
-                    ),
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                )],
-            },
-            components: [
-                MeshComponent(
-                    vertices: vec![vec![
-                        TexVertex {
-                            pos: [-1.0, 1.0, 0.2],
-                            tex_coords: [0.0, 1.0]
-                        },
-                        TexVertex {
-                            pos: [-1.0, -1.0, 0.2],
-                            tex_coords: [0.0, 0.0]
-                        },
-                        TexVertex {
-                            pos: [1.0, -1.0, 0.2],
-                            tex_coords: [1.0, 0.0]
-                        },
-                        TexVertex {
-                            pos: [1.0, 1.0, 0.2],
-                            tex_coords: [1.0, 1.0]
-                        },
-                    ]],
-                    indices: vec![vec![0,1,2,0,2,3]],
-                    enabled_models: vec![(0, None)]
-                )
-            ]
-        },
+        active_camera: "cam",
         "major_network" = {
             material: {
                 pipeline: {
                     vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
                     fragment_shader_path: "./shaders/visualizer_fragment.wgsl",
-                    vertex_layouts: [Vertex::vertex_layout()],
-                    uses_camera: false,
+                    vertex_layouts: [Vertex::vertex_layout(), TransformComponent::vertex_layout::<2>()],
+                    uses_camera: true,
                     geometry_details: {
                         topology: wgpu::PrimitiveTopology::LineList,
                         polygon_mode: wgpu::PolygonMode::Line,
@@ -309,26 +181,19 @@ async fn main() {
                             (0..arr.len() - 1).flat_map(|i| {
                                 [
                                     Vertex {
-                                        pos: [
-                                            2.0 * arr[i].x / GRID_SIZE as f32 - 1.0,
-                                            2.0 * arr[i].y / GRID_SIZE as f32 - 1.0,
-                                            0.0,
-                                        ],
+                                        pos: [ arr[i].x, 0.0, arr[i].y, ],
                                         col: [0.0, 0.0, 1.0, 1.0]
                                     },
                                     Vertex {
-                                        pos: [
-                                            2.0 * arr[i + 1].x / GRID_SIZE as f32 - 1.0,
-                                            2.0 * arr[i + 1].y / GRID_SIZE as f32 - 1.0,
-                                            0.0,
-                                        ],
+                                        pos: [ arr[i + 1].x, 0.0, arr[i + 1].y, ],
                                         col: [0.0, 0.0, 1.0, 1.0]
                                     }
                                 ]
                             })
                         }).collect()],
                     enabled_models: vec![(0, None)]
-                )
+                ),
+                TransformComponent(position: nalgebra::Vector3::new(0.0, 0.0, 0.0))
             ]
         },
         "minor_network" = {
@@ -342,26 +207,19 @@ async fn main() {
                             (0..arr.len() - 1).flat_map(|i| {
                                 [
                                     Vertex {
-                                        pos: [
-                                            2.0 * arr[i].x / GRID_SIZE as f32 - 1.0,
-                                            2.0 * arr[i].y / GRID_SIZE as f32 - 1.0,
-                                            0.0,
-                                        ],
+                                        pos: [ arr[i].x, 0.0, arr[i].y, ],
                                         col: [1.0, 0.0, 0.0, 1.0]
                                     },
                                     Vertex {
-                                        pos: [
-                                            2.0 * arr[i + 1].x / GRID_SIZE as f32 - 1.0,
-                                            2.0 * arr[i + 1].y / GRID_SIZE as f32 - 1.0,
-                                            0.0,
-                                        ],
+                                        pos: [ arr[i + 1].x, 0.0, arr[i + 1].y, ],
                                         col: [1.0, 0.0, 0.0, 1.0]
                                     }
                                 ]
                             })
                         }).collect()],
                     enabled_models: vec![(0, None)]
-                )
+                ),
+                TransformComponent(position: nalgebra::Vector3::new(0.0, 0.0, 0.0))
             ]
         },
         "plots" = {
@@ -369,8 +227,8 @@ async fn main() {
                 pipeline: {
                     vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
                     fragment_shader_path: "./shaders/visualizer_fragment.wgsl",
-                    vertex_layouts: [Vertex::vertex_layout()],
-                    uses_camera: false,
+                    vertex_layouts: [Vertex::vertex_layout(), TransformComponent::vertex_layout::<2>()],
+                    uses_camera: true,
                     ident: "network_pipeline",
                 }
             },
@@ -379,7 +237,14 @@ async fn main() {
                     vertices: vec![verts_for_triangulation],
                     indices: vec![triangulated_faces],
                     enabled_models: vec![(0, None)]
-                )
+                ),
+                TransformComponent(position: nalgebra::Vector3::new(0.0, 0.0, 0.0))
+            ]
+        },
+        "cam_ent" = {
+            components: [
+                CameraComponent(field_of_view: 80.0, aspect_ratio: 1.0, near_plane: 0.1, far_plane: GRID_SIZE as f32, sensitivity: 0.002, movement_speed: 0.05, ident: "cam"),
+                TransformComponent(position: nalgebra::Vector3::new(0.0, 0.0, 0.0))
             ]
         }
     }
@@ -387,13 +252,6 @@ async fn main() {
     engine.attach_scene(visualizer);
 
     engine.main_loop().await;
-}
-
-fn normalize_vector(vec: Vector2<f32>) -> Vector2<f32> {
-    Vector2::new(
-        2.0 * vec.x / GRID_SIZE as f32 - 1.0,
-        2.0 * vec.y / GRID_SIZE as f32 - 1.0,
-    )
 }
 
 #[repr(C)]
