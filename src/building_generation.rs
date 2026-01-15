@@ -1,6 +1,6 @@
 use cool_utils::data_structures::dcel::DCEL;
 use dyn_clone::DynClone;
-use nalgebra::Matrix2;
+use nalgebra::{Matrix2, Vector3};
 use rand::prelude::*;
 use std::{
     cmp::Ordering,
@@ -386,6 +386,18 @@ fn is_point_in_face(point: Point, face: &[Point]) -> bool {
                 + Matrix2::from_columns(&[face[(i + 1) % face.len()], face[i]]).determinant()
         })
         .all(|det_res| det_res < 0.0)
+}
+
+pub fn footprint_to_building(footprint: &[Point], height: f32) -> Vec<Vec<Vector3<f32>>> {
+    let (base, roof): (Vec<Vector3<f32>>, Vec<Vector3<f32>>) = footprint.iter().map(|point| (Vector3::new(point.x, 0.0, point.y), Vector3::new(point.x, height, point.y))).unzip();
+    let lateral_faces = (0..footprint.len() - 1).map(|i| vec![
+        Vector3::new(footprint[i].x, 0.0, footprint[i].y),
+        Vector3::new(footprint[i + 1].x, 0.0, footprint[i + 1].y),
+        Vector3::new(footprint[i + 1].x, height, footprint[i + 1].y),
+        Vector3::new(footprint[i].x, height, footprint[i].y),
+    ]);
+    
+    lateral_faces.chain(vec![base, roof]).collect()
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use nalgebra::Vector2;
+use nalgebra::{Vector2, Vector3};
 use rayon::prelude::*;
 use street_graph::path_to_graph;
 use street_plan::{HermiteCurve, SeedPoint, merge_road_endings, resample_curve, trace_street_plan};
@@ -13,7 +13,7 @@ use v4::{
 };
 use wgpu::vertex_attr_array;
 
-use crate::triangulation::triangulate_faces;
+use crate::{building_generation::footprint_to_building, triangulation::triangulate_faces};
 
 mod building_generation;
 mod intersections;
@@ -132,14 +132,27 @@ async fn main() {
         .chain(major_network_curves)
         .collect();
 
-    let faces = path_to_graph(&all_curves, 15.0, 20.0);
+    let footprints = path_to_graph(&all_curves, 15.0, 20.0);
+
+    let faces: Vec<Vec<Vector3<f32>>> = footprints
+        .iter()
+        .flat_map(|footprint| {
+            footprint_to_building(
+                footprint,
+                105.0
+                    - (footprint.iter().copied().sum::<Point>() / footprint.len() as f32)
+                        .metric_distance(&city_center)
+                        .max(100.0),
+            )
+        })
+        .collect();
 
     let triangulated_faces = triangulate_faces(&faces);
     let verts_for_triangulation: Vec<Vertex> = faces
         .into_iter()
         .flatten()
-        .map(|point| Vertex {
-            pos: [point.x, 0.0, point.y],
+        .map(|pos| Vertex {
+            pos: [pos.x, pos.y, pos.z],
             col: [0.0, 1.0, 0.0, 1.0],
         })
         .collect();
@@ -155,7 +168,6 @@ async fn main() {
         .hide_cursor(true)
         .build()
         .await;
-
 
     scene! {
         scene: visualizer,
@@ -229,7 +241,6 @@ async fn main() {
                     fragment_shader_path: "./shaders/visualizer_fragment.wgsl",
                     vertex_layouts: [Vertex::vertex_layout(), TransformComponent::vertex_layout::<2>()],
                     uses_camera: true,
-                    ident: "network_pipeline",
                 }
             },
             components: [

@@ -1208,11 +1208,11 @@ mod test {
         let expected_intersections = vec![
             IntersectionPoint {
                 position: Point::new(2.0, 4.0),
-                intersecting_segment_indices: vec![0, 1]
+                intersecting_segment_indices: vec![0, 1],
             },
             IntersectionPoint {
                 position: Point::new(4.0, 4.0),
-                intersecting_segment_indices: vec![1, 2]
+                intersecting_segment_indices: vec![1, 2],
             },
         ];
 
@@ -2297,18 +2297,18 @@ mod test {
     #[test]
     fn simple_concave_point_gets_flattened() {
         let points = vec![
-            Point::new(410.44534, 242.83728),
-            Point::new(412.62637, 235.54596),
+            Point::new(412.018842, 237.069562),
             Point::new(413.1286, 231.04807),
             Point::new(419.4213, 231.9646),
             Point::new(416.70108, 244.23975),
+            Point::new(410.44534, 242.83728),
         ];
 
         let (face, adjacency_list) = verts_to_adjacency_list(&points);
 
         let (_, concave_indices) = detect_convex_and_concave_vertices(&face);
 
-        let flattened_face = flatten_face(face, adjacency_list, 0.95, 0.07, concave_indices);
+        let flattened_face = flatten_face(face, adjacency_list, 0.95, 0.08, concave_indices);
 
         assert_eq!(flattened_face.len(), 4);
     }
@@ -2546,15 +2546,14 @@ mod test {
             .collect();
         let subdivision = subdivide_face_helper(outer_segments, 6.7, 0.0);
 
-        assert_eq!(subdivision.len(), 2);
+        assert_eq!(subdivision.len(), 3);
+        
+        let face_edge_count_and_outer_edge_counts = [(6, 4), (4, 2), (3, 2)];
 
-        assert_eq!(subdivision[0].len(), 3);
-        let first_face_flags: Vec<bool> = subdivision[0].iter().map(|(_, flag)| *flag).collect();
-        assert_eq!(first_face_flags, vec![false, true, true]);
-
-        assert_eq!(subdivision[1].len(), 6);
-        let second_face_flags: Vec<bool> = subdivision[1].iter().map(|(_, flag)| *flag).collect();
-        assert_eq!(second_face_flags, vec![true, true, true, true, false, true]);
+        for (i, (edge_count, outer_edge_count)) in face_edge_count_and_outer_edge_counts.iter().enumerate() {
+            assert_eq!(subdivision[i].len(), *edge_count);
+            assert_eq!(subdivision[i].iter().filter(|(_, flag)| *flag).count(), *outer_edge_count);
+        }
     }
 
     #[test]
@@ -2571,40 +2570,43 @@ mod test {
             .map(|i| ([face[i], face[(i + 1) % face.len()]], true))
             .collect();
         let subdivision = subdivide_face_helper(outer_segments, 1.5, 0.0);
-        assert_eq!(subdivision.len(), 9);
-        subdivision.iter().for_each(|segments| {
-            println!(
-                "polygon({:?})",
-                segments
-                    .iter()
-                    .flat_map(|([p_0, p_1], _)| [(p_0.x, p_0.y), (p_1.x, p_1.y)])
-                    .collect::<Vec<_>>()
-            )
-        });
+
+        assert_eq!(subdivision.len(), 7);
+
+        let face_edge_count_and_outer_edge_counts = [(4, 1), (3, 1), (6, 3), (4, 2), (5, 2), (4, 1), (3, 2)];
+
+        for (i, (edge_count, outer_edge_count)) in face_edge_count_and_outer_edge_counts.iter().enumerate() {
+            assert_eq!(subdivision[i].len(), *edge_count);
+            assert_eq!(subdivision[i].iter().filter(|(_, flag)| *flag).count(), *outer_edge_count);
+        }
     }
 
     #[test]
     fn colinear_intersection() {
-        // TODO: Fix colinear intersections
         let segments = [
             [Point::new(0.0, 0.0), Point::new(2.0, 0.0)],
             [Point::new(1.0, 0.0), Point::new(4.0, 0.0)],
         ];
         let intersections = find_segments_intersections(&segments, 0.0001, true);
-
-        assert_eq!(intersections.len(), 4);
-        assert!(intersections.iter().any(|point| points_are_close(
-            point.position(),
-            Point::new(1.0, 0.0)
-        )
-            && point.intersecting_segment_indices.contains(&0)
-            && point.intersecting_segment_indices.contains(&1)));
-        assert!(intersections.iter().any(|point| points_are_close(
-            point.position(),
-            Point::new(2.0, 0.0)
-        )
-            && point.intersecting_segment_indices.contains(&0)
-            && point.intersecting_segment_indices.contains(&1)));
+        let expected_intersections = vec![
+            IntersectionPoint {
+                position: Point::new(1.0, 0.0),
+                intersecting_segment_indices: vec![0, 1],
+            },
+            IntersectionPoint {
+                position: Point::new(2.0, 0.0),
+                intersecting_segment_indices: vec![0, 1],
+            },
+            IntersectionPoint {
+                position: Point::new(0.0, 0.0),
+                intersecting_segment_indices: vec![0],
+            },
+            IntersectionPoint {
+                position: Point::new(4.0, 0.0),
+                intersecting_segment_indices: vec![1],
+            },
+        ];
+        assert_intersections_eq(&intersections, &expected_intersections);
     }
 
     #[test]

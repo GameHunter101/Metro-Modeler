@@ -1,27 +1,12 @@
-use crate::tensor_field::Point;
+use nalgebra::Vector3;
 
-fn triangulate(face: &[Point]) -> Vec<[u32; 3]> {
-    /* let mut index = face.len() - 1;
-    let mut triangulated = Vec::with_capacity(face.len() - 2);
-
-    while index > 2 {
-        triangulated.push([
-            (index as isize - 1).rem_euclid(face.len() as isize) as usize,
-            index,
-            (index + 1) % face.len(),
-        ]);
-        index -= 1;
-    }
-
-    triangulated.push([0, 1, 2]);
-
-    triangulated */
+fn triangulate<T>(face: &[T]) -> Vec<[u32; 3]> {
     triangulate_helper(face, vec![true; face.len()], face.len())
 }
 
 /// Invariant: valid_vertices_count >= 3
-fn triangulate_helper(
-    face: &[Point],
+fn triangulate_helper<T>(
+    face: &[T],
     mut valid_vertices_mask: Vec<bool>,
     valid_vertices_count: usize,
 ) -> Vec<[u32; 3]> {
@@ -111,7 +96,7 @@ fn triangle_around_vertex(vert_index: usize, ignored_vertices_mask: &[bool]) -> 
     );
 }
 
-pub fn triangulate_faces(faces: &[Vec<Point>]) -> Vec<u32> {
+pub fn triangulate_faces(faces: &[Vec<Vector3<f32>>]) -> Vec<u32> {
     let mut index_offset = 0;
 
     faces
