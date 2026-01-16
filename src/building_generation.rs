@@ -8,6 +8,7 @@ use std::{
 };
 
 use crate::{
+    Vertex,
     street_graph::{OrderedPoint, order_point, segments_to_adjacency_list},
     tensor_field::Point,
 };
@@ -268,12 +269,18 @@ fn cut_shapes(shapes: Vec<Vec<Point>>, shapes_cut: usize) -> Vec<Vec<Point>> {
                 split_shapes_to_disjoint_faces(vec![first_shape.clone(), shape]);
 
             dbg!(disjoint_faces.len());
-            println!("VERTICES: {:?}", all_vertices.iter().map(|v| (v.x, v.y)).collect::<Vec<_>>());
+            println!(
+                "VERTICES: {:?}",
+                all_vertices.iter().map(|v| (v.x, v.y)).collect::<Vec<_>>()
+            );
             println!(
                 "DISJOINT FACES: {:?}",
-               disjoint_faces 
+                disjoint_faces
                     .iter()
-                    .map(|face| face.iter().map(|&vert| (all_vertices[vert].x, all_vertices[vert].y)).collect::<Vec<_>>())
+                    .map(|face| face
+                        .iter()
+                        .map(|&vert| (all_vertices[vert].x, all_vertices[vert].y))
+                        .collect::<Vec<_>>())
                     .collect::<Vec<_>>()
             );
 
@@ -388,15 +395,34 @@ fn is_point_in_face(point: Point, face: &[Point]) -> bool {
         .all(|det_res| det_res < 0.0)
 }
 
-pub fn footprint_to_building(footprint: &[Point], height: f32) -> Vec<Vec<Vector3<f32>>> {
-    let (base, roof): (Vec<Vector3<f32>>, Vec<Vector3<f32>>) = footprint.iter().map(|point| (Vector3::new(point.x, 0.0, point.y), Vector3::new(point.x, height, point.y))).unzip();
-    let lateral_faces = (0..footprint.len() - 1).map(|i| vec![
-        Vector3::new(footprint[i].x, 0.0, footprint[i].y),
-        Vector3::new(footprint[i + 1].x, 0.0, footprint[i + 1].y),
-        Vector3::new(footprint[i + 1].x, height, footprint[i + 1].y),
-        Vector3::new(footprint[i].x, height, footprint[i].y),
-    ]);
-    
+pub fn footprint_to_building(footprint: &[Point], height: f32) -> Vec<Vec<Vertex>> {
+    let (base, roof): (Vec<Vertex>, Vec<Vertex>) = footprint
+        .iter()
+        .map(|point| {
+            (
+                Vertex {pos: [point.x, 0.0, point.y], normal: [0.0, -1.0, 0.0], col: [0.0, 1.0, 0.0, 1.0] },
+                Vertex {pos: [point.x, height, point.y], normal: [0.0, 1.0, 0.0], col: [0.0, 1.0, 0.0, 1.0] },
+            )
+        })
+        .unzip();
+
+    let lateral_faces = (0..footprint.len()).map(|i| {
+        // let normal = Vector3::new();
+        let next_idx = (i + 1) % footprint.len();
+        let coords = [
+            Vector3::new(footprint[i].x, 0.0, footprint[i].y),
+            Vector3::new(footprint[next_idx].x, 0.0, footprint[next_idx].y),
+            Vector3::new(footprint[next_idx].x, height, footprint[next_idx].y),
+            Vector3::new(footprint[i].x, height, footprint[i].y),
+        ];
+        let normal = Vector3::y().cross(&(coords[1] - coords[0])).normalize();
+        coords.into_iter().map(|pos| Vertex {
+            pos: pos.into(),
+            normal: normal.into(),
+            col: [0.0, 1.0, 0.0, 1.0],
+        }).collect::<Vec<_>>()
+    });
+
     lateral_faces.chain(vec![base, roof]).collect()
 }
 

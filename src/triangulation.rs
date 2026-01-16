@@ -1,5 +1,3 @@
-use nalgebra::Vector3;
-
 fn triangulate<T>(face: &[T]) -> Vec<[u32; 3]> {
     triangulate_helper(face, vec![true; face.len()], face.len())
 }
@@ -96,7 +94,7 @@ fn triangle_around_vertex(vert_index: usize, ignored_vertices_mask: &[bool]) -> 
     );
 }
 
-pub fn triangulate_faces(faces: &[Vec<Vector3<f32>>]) -> Vec<u32> {
+pub fn triangulate_faces<T>(faces: &[Vec<T>]) -> Vec<u32> {
     let mut index_offset = 0;
 
     faces

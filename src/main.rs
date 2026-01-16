@@ -1,4 +1,3 @@
-use nalgebra::{Vector2, Vector3};
 use rayon::prelude::*;
 use street_graph::path_to_graph;
 use street_plan::{HermiteCurve, SeedPoint, merge_road_endings, resample_curve, trace_street_plan};
@@ -26,24 +25,24 @@ mod triangulation;
 async fn main() {
     let start_time = std::time::Instant::now();
     let grid_element = DesignElement::Grid {
-        center: Vector2::new(100.0, 100.0),
+        center: Point::new(100.0, 100.0),
         theta: -std::f32::consts::FRAC_PI_3 * 2.0,
         // theta: 0.0,
         length: 500.0,
     };
 
     let grid_element_2 = DesignElement::Grid {
-        center: Vector2::new(300.0, 400.0),
+        center: Point::new(300.0, 400.0),
         theta: 0.1,
         length: 200.0,
     };
 
     let radial_element = DesignElement::Radial {
-        center: Vector2::new(200.0, 200.0),
+        center: Point::new(200.0, 200.0),
     };
 
     let grid_element_3 = DesignElement::Grid {
-        center: Vector2::new(0.0, 400.0),
+        center: Point::new(0.0, 400.0),
         theta: 0.7,
         length: 10.0,
     };
@@ -134,7 +133,7 @@ async fn main() {
 
     let footprints = path_to_graph(&all_curves, 15.0, 20.0);
 
-    let faces: Vec<Vec<Vector3<f32>>> = footprints
+    let faces: Vec<Vec<Vertex>> = footprints
         .iter()
         .flat_map(|footprint| {
             footprint_to_building(
@@ -142,20 +141,13 @@ async fn main() {
                 105.0
                     - (footprint.iter().copied().sum::<Point>() / footprint.len() as f32)
                         .metric_distance(&city_center)
-                        .max(100.0),
+                        .min(100.0),
             )
         })
         .collect();
 
     let triangulated_faces = triangulate_faces(&faces);
-    let verts_for_triangulation: Vec<Vertex> = faces
-        .into_iter()
-        .flatten()
-        .map(|pos| Vertex {
-            pos: [pos.x, pos.y, pos.z],
-            col: [0.0, 1.0, 0.0, 1.0],
-        })
-        .collect();
+    let verts_for_triangulation: Vec<Vertex> = faces.into_iter().flatten().collect();
 
     let mut engine = v4::V4::builder()
         .features(wgpu::Features::POLYGON_MODE_LINE | wgpu::Features::POLYGON_MODE_POINT)
@@ -166,6 +158,7 @@ async fn main() {
             None,
         )
         .hide_cursor(true)
+        .antialiasing_enabled(true)
         .build()
         .await;
 
@@ -177,7 +170,7 @@ async fn main() {
                 pipeline: {
                     vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
                     fragment_shader_path: "./shaders/visualizer_fragment.wgsl",
-                    vertex_layouts: [Vertex::vertex_layout(), TransformComponent::vertex_layout::<2>()],
+                    vertex_layouts: [LineVertex::vertex_layout(), TransformComponent::vertex_layout::<2>()],
                     uses_camera: true,
                     geometry_details: {
                         topology: wgpu::PrimitiveTopology::LineList,
@@ -192,11 +185,11 @@ async fn main() {
                         vec![major_network.iter().flat_map(|arr| {
                             (0..arr.len() - 1).flat_map(|i| {
                                 [
-                                    Vertex {
+                                    LineVertex {
                                         pos: [ arr[i].x, 0.0, arr[i].y, ],
                                         col: [0.0, 0.0, 1.0, 1.0]
                                     },
-                                    Vertex {
+                                    LineVertex {
                                         pos: [ arr[i + 1].x, 0.0, arr[i + 1].y, ],
                                         col: [0.0, 0.0, 1.0, 1.0]
                                     }
@@ -218,11 +211,11 @@ async fn main() {
                         vec![minor_network.iter().flat_map(|arr| {
                             (0..arr.len() - 1).flat_map(|i| {
                                 [
-                                    Vertex {
+                                    LineVertex {
                                         pos: [ arr[i].x, 0.0, arr[i].y, ],
                                         col: [1.0, 0.0, 0.0, 1.0]
                                     },
-                                    Vertex {
+                                    LineVertex {
                                         pos: [ arr[i + 1].x, 0.0, arr[i + 1].y, ],
                                         col: [1.0, 0.0, 0.0, 1.0]
                                     }
@@ -237,9 +230,9 @@ async fn main() {
         "plots" = {
             material: {
                 pipeline: {
-                    vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
-                    fragment_shader_path: "./shaders/visualizer_fragment.wgsl",
-                    vertex_layouts: [Vertex::vertex_layout(), TransformComponent::vertex_layout::<2>()],
+                    vertex_shader_path: "./shaders/buildings_vertex.wgsl",
+                    fragment_shader_path: "./shaders/buildings_fragment.wgsl",
+                    vertex_layouts: [Vertex::vertex_layout(), TransformComponent::vertex_layout::<3>()],
                     uses_camera: true,
                 }
             },
@@ -267,12 +260,12 @@ async fn main() {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
+struct LineVertex {
     pos: [f32; 3],
     col: [f32; 4],
 }
 
-impl VertexDescriptor for Vertex {
+impl VertexDescriptor for LineVertex {
     const ATTRIBUTES: &[wgpu::VertexAttribute] =
         &vertex_attr_array![0 => Float32x3, 1 => Float32x4];
 
@@ -286,19 +279,21 @@ impl VertexDescriptor for Vertex {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct TexVertex {
+struct Vertex {
     pos: [f32; 3],
-    tex_coords: [f32; 2],
+    normal: [f32; 3],
+    col: [f32; 4],
 }
 
-impl VertexDescriptor for TexVertex {
+impl VertexDescriptor for Vertex {
     const ATTRIBUTES: &[wgpu::VertexAttribute] =
-        &vertex_attr_array![0 => Float32x3, 1 => Float32x2];
+        &vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
 
-    fn from_pos_normal_coords(pos: Vec<f32>, _normal: Vec<f32>, tex_coords: Vec<f32>) -> Self {
+    fn from_pos_normal_coords(pos: Vec<f32>, normal: Vec<f32>, _tex_coords: Vec<f32>) -> Self {
         Self {
             pos: pos.try_into().unwrap(),
-            tex_coords: tex_coords.try_into().unwrap(),
+            normal: normal.try_into().unwrap(),
+            col: [1.0; 4]
         }
     }
 }
