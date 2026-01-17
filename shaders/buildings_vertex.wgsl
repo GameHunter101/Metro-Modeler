@@ -1,7 +1,7 @@
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    @location(2) col: vec4<f32>,
+    @location(2) tex_coords: vec2<f32>,
     @builtin(vertex_index) index: u32,
 }
 
@@ -16,7 +16,7 @@ struct VertexOutput {
     @builtin(position) pos: vec4<f32>,
     @location(0) real_pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    @location(2) col: vec4<f32>,
+    @location(2) tex_coords: vec2<f32>,
     @location(3) cam_pos: vec3<f32>,
 }
 
@@ -42,7 +42,7 @@ fn main(input: VertexInput, transform: TransformData) -> VertexOutput {
     out.pos = camera.mat * (transform_mat * vec4f(input.position, 1.0));
     out.real_pos = input.position;
     out.normal = input.normal;
-    out.col = input.col;
+    out.tex_coords = input.tex_coords;
     out.cam_pos = camera.pos;
     return out;
 }

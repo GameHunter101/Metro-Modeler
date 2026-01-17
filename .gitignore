@@ -1,5 +1,5 @@
 /target
-test.png
+*.png
 flamegraph.svg
 out.txt
 *.pdf

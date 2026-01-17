@@ -17,12 +17,12 @@ struct VertexOutput {
 }
 
 
-struct Camera {
+/* struct Camera {
     mat: mat4x4<f32>
 }
 
 @group(0) @binding(0)
-var<uniform> camera: Camera;
+var<uniform> camera: Camera; */
 
 @vertex
 fn main(input: VertexInput, transform: TransformData) -> VertexOutput {
@@ -34,8 +34,8 @@ fn main(input: VertexInput, transform: TransformData) -> VertexOutput {
     );
 
     var out: VertexOutput;
-    out.pos = camera.mat * (transform_mat * vec4f(input.position, 1.0));
-    // out.pos = vec4f(input.position, 1.0);
+    // out.pos = camera.mat * (transform_mat * vec4f(input.position, 1.0));
+    out.pos = vec4f(input.position, 1.0);
     out.col = input.col;
     return out;
 }

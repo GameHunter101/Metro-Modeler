@@ -400,8 +400,16 @@ pub fn footprint_to_building(footprint: &[Point], height: f32) -> Vec<Vec<Vertex
         .iter()
         .map(|point| {
             (
-                Vertex {pos: [point.x, 0.0, point.y], normal: [0.0, -1.0, 0.0], col: [0.0, 1.0, 0.0, 1.0] },
-                Vertex {pos: [point.x, height, point.y], normal: [0.0, 1.0, 0.0], col: [0.0, 1.0, 0.0, 1.0] },
+                Vertex {
+                    pos: [point.x, 0.0, point.y],
+                    normal: [0.0, -1.0, 0.0],
+                    tex_coords: [0.0; 2],
+                },
+                Vertex {
+                    pos: [point.x, height, point.y],
+                    normal: [0.0, 1.0, 0.0],
+                    tex_coords: [0.0; 2],
+                },
             )
         })
         .unzip();
@@ -415,12 +423,19 @@ pub fn footprint_to_building(footprint: &[Point], height: f32) -> Vec<Vec<Vertex
             Vector3::new(footprint[next_idx].x, height, footprint[next_idx].y),
             Vector3::new(footprint[i].x, height, footprint[i].y),
         ];
-        let normal = Vector3::y().cross(&(coords[1] - coords[0])).normalize();
-        coords.into_iter().map(|pos| Vertex {
-            pos: pos.into(),
-            normal: normal.into(),
-            col: [0.0, 1.0, 0.0, 1.0],
-        }).collect::<Vec<_>>()
+        let normal: [f32; 3] = Vector3::y()
+            .cross(&(coords[1] - coords[0]))
+            .normalize()
+            .into();
+
+        coords
+            .into_iter()
+            .map(|pos| Vertex {
+                pos: pos.into(),
+                normal,
+                tex_coords: [(pos - coords[0]).xz().norm(), pos.y],
+            })
+            .collect::<Vec<_>>()
     });
 
     lateral_faces.chain(vec![base, roof]).collect()

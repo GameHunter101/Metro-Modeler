@@ -1,16 +1,22 @@
 use core::f32;
 use std::collections::BinaryHeap;
 
+use image::{GenericImageView, Pixel};
 use nalgebra::Vector2;
 use rand::Rng;
 use rayon::prelude::*;
 
 use crate::tensor_field::{EvalEigenvectors, GRID_SIZE, Point, TensorField};
 
-pub fn distribute_points(point_count: u32) -> Vec<Point> {
+pub fn distribute_points(point_count: u32, mask_path: &str) -> Vec<Point> {
     let mut rand = rand::rng();
 
     let mut points = Vec::new();
+
+    let mask = image::ImageReader::open(mask_path)
+        .unwrap()
+        .decode()
+        .unwrap();
 
     while (points.len() as u32) < point_count {
         let candidates: Vec<Point> = (0..10)
@@ -19,6 +25,10 @@ pub fn distribute_points(point_count: u32) -> Vec<Point> {
                     rand.random_range(0..GRID_SIZE) as f32,
                     rand.random_range(0..GRID_SIZE) as f32,
                 )
+            })
+            .filter(|point| {
+                let rounded_pos = (point.x as u32, point.y as u32);
+                mask.get_pixel(rounded_pos.0, rounded_pos.1).to_luma().0[0] == 0
             })
             .collect();
         let distances: Vec<f32> = candidates
@@ -186,6 +196,7 @@ pub fn heap_to_vec<T: Clone + Ord>(heap: BinaryHeap<T>) -> Vec<T> {
 
 pub fn trace_street_plan(
     tensor_field: &TensorField,
+    mask_path: &str,
     seeds: TraceSeeds,
     city_center: Point,
     d_sep: f32,
@@ -195,43 +206,10 @@ pub fn trace_street_plan(
 ) -> (Vec<HermiteCurve>, Vec<HermiteCurve>) {
     let mut seed_points = match seeds {
         TraceSeeds::Random(starting_seed_count) => {
-            let temp_points = [
-                (391.0, 113.0),
-                (10.0, 470.0),
-                (382.0, 472.0),
-                (61.0, 152.0),
-                (413.0, 291.0),
-                (191.0, 298.0),
-                (0.0, 303.0),
-                (147.0, 0.0),
-                (304.0, 294.0),
-                (298.0, 41.0),
-                (230.0, 509.0),
-                (502.0, 416.0),
-                (127.0, 205.0),
-                (285.0, 162.0),
-                (459.0, 40.0),
-                (299.0, 436.0),
-                (121.0, 472.0),
-                (508.0, 493.0),
-                (470.0, 151.0),
-                (214.0, 413.0),
-                (364.0, 355.0),
-                (171.0, 63.0),
-                (355.0, 191.0),
-                (274.0, 355.0),
-                (66.0, 336.0),
-                (230.0, 65.0),
-                (30.0, 31.0),
-                (223.0, 12.0),
-                (193.0, 146.0),
-                (447.0, 224.0),
-            ]
-            .map(|p| Point::new(p.0, p.1));
-
+            let seed_points = distribute_points(starting_seed_count, mask_path);
+            println!("Seeds: {seed_points:?}");
             prioritize_points(
-                // &distribute_points(starting_seed_count),
-                &temp_points,
+                &seed_points,
                 city_center,
                 &tensor_field,
             )
@@ -868,8 +846,13 @@ pub fn merge_road_endings(curves: &[HermiteCurve], connection_distance: f32) -> 
 
         let connection_distance_squared = connection_distance * connection_distance;
 
-        let merged_top = merge_point_to_curves(curve[0], &other_curves, connection_distance_squared);
-        let merged_bottom = merge_point_to_curves(*curve.last().unwrap(), &other_curves, connection_distance_squared);
+        let merged_top =
+            merge_point_to_curves(curve[0], &other_curves, connection_distance_squared);
+        let merged_bottom = merge_point_to_curves(
+            *curve.last().unwrap(),
+            &other_curves,
+            connection_distance_squared,
+        );
 
         merged_curves.push(
             std::iter::once(merged_top)

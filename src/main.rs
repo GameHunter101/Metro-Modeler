@@ -12,7 +12,10 @@ use v4::{
 };
 use wgpu::vertex_attr_array;
 
-use crate::{building_generation::footprint_to_building, triangulation::triangulate_faces};
+use crate::{
+    building_generation::footprint_to_building, triangulation::triangulate_faces,
+    water_mask::mask_to_elements,
+};
 
 mod building_generation;
 mod intersections;
@@ -20,6 +23,7 @@ mod street_graph;
 mod street_plan;
 mod tensor_field;
 mod triangulation;
+mod water_mask;
 
 #[tokio::main]
 async fn main() {
@@ -49,14 +53,20 @@ async fn main() {
 
     let city_center = *radial_element.center().as_ref().unwrap();
 
+    let water_edge = mask_to_elements("water_mask.png");
+
     let tensor_field = TensorField::new(
-        vec![grid_element, radial_element, grid_element_2, grid_element_3],
+        vec![grid_element, radial_element, grid_element_2, grid_element_3]
+            .into_iter()
+            .chain(water_edge)
+            .collect(),
         0.0004,
     );
 
     let (major_network_major_curves_unconnected, major_network_minor_curves_unconnected) =
         trace_street_plan(
             &tensor_field,
+            "water_mask.png",
             street_plan::TraceSeeds::Random(30),
             city_center,
             30.0,
@@ -99,6 +109,7 @@ async fn main() {
     let (minor_network_major_curves_unconnected, minor_network_minor_curves_unconnected) =
         trace_street_plan(
             &tensor_field,
+            "water_mask.png",
             street_plan::TraceSeeds::Specific(minor_network_seed_points),
             city_center,
             5.0,
@@ -138,10 +149,13 @@ async fn main() {
         .flat_map(|footprint| {
             footprint_to_building(
                 footprint,
-                105.0
+                ((55.0
                     - (footprint.iter().copied().sum::<Point>() / footprint.len() as f32)
                         .metric_distance(&city_center)
-                        .min(100.0),
+                        .min(50.0))
+                    / 5.0)
+                    .floor()
+                    * 5.0,
             )
         })
         .collect();
@@ -165,6 +179,42 @@ async fn main() {
     scene! {
         scene: visualizer,
         active_camera: "cam",
+        /* "eigenvectors" = {
+            material: {
+                pipeline: {
+                    vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
+                    fragment_shader_path: "./shaders/visualizer_fragment.wgsl",
+                    vertex_layouts: [LineVertex::vertex_layout(), TransformComponent::vertex_layout::<2>()],
+                    uses_camera: false,
+                    geometry_details: {
+                        topology: wgpu::PrimitiveTopology::LineList,
+                        polygon_mode: wgpu::PolygonMode::Line,
+                    },
+                },
+            },
+            components: [
+                MeshComponent(
+                    vertices: vec![
+                        (0..GRID_SIZE / sample_factor).flat_map(|x| (0..GRID_SIZE / sample_factor).flat_map(|y| {
+                            let point = Point::new(x as f32 * sample_factor as f32, y as f32 * sample_factor as f32);
+                            let tensor = tensor_field.evaluate_smoothed_field_at_point(point);
+                            let eigenvectors = tensor.eigenvectors();
+                            let maj = eigenvectors.major.normalize() * (sample_factor - 1) as f32;
+                            let min = eigenvectors.minor.normalize() * (sample_factor - 1) as f32;
+                            let maj_point = normalize_vector(point + maj);
+                            let min_point = normalize_vector(point + min);
+                            let norm_point = normalize_vector(point);
+                            [
+                                LineVertex {pos: [norm_point.x, norm_point.y, 0.0], col: [1.0, 0.0, 0.0, vector_opacity]}, LineVertex {pos: [maj_point.x, maj_point.y, 0.0], col: [1.0, 0.0, 0.0, vector_opacity]},
+                                LineVertex {pos: [norm_point.x, norm_point.y, 0.0], col: [0.0, 1.0, 0.0, vector_opacity]}, LineVertex {pos: [min_point.x, min_point.y, 0.0], col: [0.0, 1.0, 0.0, vector_opacity]}
+                            ]
+                        }).collect::<Vec<_>>()).collect()
+                    ],
+                    enabled_models: vec![(0, None)]
+                ),
+                TransformComponent(position: nalgebra::Vector3::zeros())
+            ]
+        }, */
         "major_network" = {
             material: {
                 pipeline: {
@@ -248,7 +298,7 @@ async fn main() {
         "cam_ent" = {
             components: [
                 CameraComponent(field_of_view: 80.0, aspect_ratio: 1.0, near_plane: 0.1, far_plane: GRID_SIZE as f32, sensitivity: 0.002, movement_speed: 0.05, ident: "cam"),
-                TransformComponent(position: nalgebra::Vector3::new(0.0, 0.0, 0.0))
+                TransformComponent(position: nalgebra::Vector3::new(50.0, 30.0, 50.0))
             ]
         }
     }
@@ -282,18 +332,18 @@ impl VertexDescriptor for LineVertex {
 struct Vertex {
     pos: [f32; 3],
     normal: [f32; 3],
-    col: [f32; 4],
+    tex_coords: [f32; 2],
 }
 
 impl VertexDescriptor for Vertex {
     const ATTRIBUTES: &[wgpu::VertexAttribute] =
-        &vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
+        &vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
 
-    fn from_pos_normal_coords(pos: Vec<f32>, normal: Vec<f32>, _tex_coords: Vec<f32>) -> Self {
+    fn from_pos_normal_coords(pos: Vec<f32>, normal: Vec<f32>, tex_coords: Vec<f32>) -> Self {
         Self {
             pos: pos.try_into().unwrap(),
             normal: normal.try_into().unwrap(),
-            col: [1.0; 4]
+            tex_coords: tex_coords.try_into().unwrap(),
         }
     }
 }
