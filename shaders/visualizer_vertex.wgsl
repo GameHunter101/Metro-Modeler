@@ -17,12 +17,12 @@ struct VertexOutput {
 }
 
 
-/* struct Camera {
+struct Camera {
     mat: mat4x4<f32>
 }
 
 @group(0) @binding(0)
-var<uniform> camera: Camera; */
+var<uniform> camera: Camera;
 
 @vertex
 fn main(input: VertexInput, transform: TransformData) -> VertexOutput {
