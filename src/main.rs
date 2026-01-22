@@ -1,26 +1,34 @@
-use image::{EncodableLayout, ImageBuffer};
+#![allow(unstable_name_collisions)]
+
+use image::{EncodableLayout, GenericImage, ImageBuffer, ImageReader, Rgba};
 use rand::Rng;
 use rayon::prelude::*;
 use street_graph::path_to_graph;
 use street_plan::{HermiteCurve, SeedPoint, merge_road_endings, resample_curve, trace_street_plan};
 use tensor_field::{DesignElement, GRID_SIZE, Point, TensorField};
+use v4::ecs::compute::Compute;
+use v4::ecs::material::{GeneralTexture, ShaderBufferAttachment};
 use v4::{
     builtin_components::{
         camera_component::CameraComponent,
         mesh_component::{MeshComponent, VertexDescriptor},
         transform_component::TransformComponent,
     },
+    ecs::material::{ShaderAttachment, ShaderTextureAttachment},
     engine_support::texture_support::Texture,
     scene,
 };
+use wgpu::util::DeviceExt;
 use wgpu::vertex_attr_array;
 
+use crate::field_visualization_component::FieldVisualizationComponent;
 use crate::{
     building_generation::footprint_to_building, tensor_field::EvalEigenvectors,
     triangulation::triangulate_faces, water_mask::mask_to_elements,
 };
 
 mod building_generation;
+mod field_visualization_component;
 mod intersections;
 mod street_graph;
 mod street_plan;
@@ -33,7 +41,6 @@ async fn main() {
     let start_time = std::time::Instant::now();
     let grid_element = DesignElement::Grid {
         center: Point::new(100.0, 100.0),
-        // theta: -std::f32::consts::FRAC_PI_3 * 2.0,
         theta: std::f32::consts::FRAC_PI_2,
         length: 100.0,
     };
@@ -56,87 +63,40 @@ async fn main() {
 
     let city_center = *radial_element.center().as_ref().unwrap();
 
-    let (water_edge, edge_elements) = mask_to_elements("water_mask.png");
+    let mut water_mask_image = ImageReader::open("water_mask.png")
+        .unwrap()
+        .decode()
+        .unwrap();
+
+    water_mask_image = water_mask_image.resize(
+        water_mask_image.width() + 2,
+        water_mask_image.height() + 2,
+        image::imageops::FilterType::Nearest,
+    );
+    for x in 0..water_mask_image.width() {
+        water_mask_image.put_pixel(x, 0, Rgba([0, 0, 0, 255]));
+        water_mask_image.put_pixel(x, water_mask_image.height() - 1, Rgba([0, 0, 0, 255]));
+    }
+    for y in 0..water_mask_image.height() {
+        water_mask_image.put_pixel(0, y, Rgba([0, 0, 0, 255]));
+        water_mask_image.put_pixel(water_mask_image.width() - 1, y, Rgba([0, 0, 0, 255]));
+    }
+
+    let (water_edge, edge_elements) = mask_to_elements(&water_mask_image, 10);
     println!("Water edge length: {}", water_edge.len());
 
     let tensor_field = TensorField::new(
+        /* vec![grid_element, radial_element, grid_element_2, grid_element_3]
+            .into_iter()
+            .chain(edge_elements)
+            .collect(), */
         edge_elements,
-        /* vec![
-            grid_element, /* , radial_element, grid_element_2, grid_element_3 */
-        ], */
-        /* .into_iter()
-        .chain(edge_elements)
-        .collect(), */
         0.0004,
     );
 
-    let tensor_field_grid_size = 128_usize;
-    let mut grid = (-(tensor_field_grid_size as i32)..=tensor_field_grid_size as i32)
-        .map(|y| {
-            (-(tensor_field_grid_size as i32)..=tensor_field_grid_size as i32)
-                .map(|x| Point::new(x as f32, y as f32) / (tensor_field_grid_size as f32))
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-
-    for _ in 0..5 {
-        for row in &mut grid {
-            for point in row {
-                let field_value = tensor_field.evaluate_smoothed_field_at_point(*point);
-                if field_value.norm() > 0.0001 {
-                    println!("Valid at: {point:?}");
-                }
-                *point += field_value.eigenvectors().major.normalize() / 10.0;
-            }
-        }
-    }
-
-    let mut white_noise =
-        ImageBuffer::new(GRID_SIZE, GRID_SIZE);
-    let mut rng = rand::rng();
-    for pix in white_noise.pixels_mut() {
-        let val =
-            (rng.sample::<f32, _>(rand_distr::Normal::new(1.0, 1.0).unwrap()) * 255.0).abs() as u8;
-        *pix = image::Rgba([val, val, val, 255]);
-    }
-
-    let tiles: Vec<Vertex> = (0..(2 * tensor_field_grid_size))
-        .flat_map(|y| {
-            (0..(2 * tensor_field_grid_size))
-                .flat_map(|x| {
-                    let x_coord = x as f32 / (2.0 * tensor_field_grid_size as f32);
-                    let y_coord = y as f32 / (2.0 * tensor_field_grid_size as f32);
-                    let offset = 1.0 / tensor_field_grid_size as f32;
-                    [
-                        Vertex {
-                            pos: [grid[y][x].x, grid[y][x].y, 0.1],
-                            normal: [0.0; 3],
-                            tex_coords: [x_coord, y_coord],
-                        },
-                        Vertex {
-                            pos: [grid[y][x + 1].x, grid[y][x + 1].y, 0.1],
-                            normal: [0.0; 3],
-                            tex_coords: [x_coord + offset, y_coord],
-                        },
-                        Vertex {
-                            pos: [grid[y + 1][x].x, grid[y + 1][x].y, 0.1],
-                            normal: [0.0; 3],
-                            tex_coords: [x_coord, y_coord + offset],
-                        },
-                        Vertex {
-                            pos: [grid[y + 1][x + 1].x, grid[y + 1][x + 1].y, 0.1],
-                            normal: [0.0; 3],
-                            tex_coords: [x_coord + offset, y_coord + offset],
-                        },
-                    ]
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    let tile_indices: Vec<u32> = (0..=tensor_field_grid_size as u32 * tensor_field_grid_size as u32 * 4)
-        .flat_map(|i| vec![4 * i, 4 * i + 1, 4 * i + 2, 4 * i + 1, 4 * i + 3, 4 * i + 2])
-        .collect();
+    let eigen = tensor_field.evaluate_smoothed_field_at_point(Point::new(100.0, 100.0)).eigenvectors();
+    println!("Eigenvectors: {:?}", eigen);
+    println!("minor: {:?}", eigen.minor.norm());
 
     let (major_network_major_curves_unconnected, major_network_minor_curves_unconnected) =
         trace_street_plan(
@@ -144,10 +104,13 @@ async fn main() {
             "water_mask.png",
             street_plan::TraceSeeds::Random(30),
             city_center,
-            30.0,
+            |_| 20.0,
+            300.0,
+            100.0,
             5,
             Vec::new(),
             Vec::new(),
+            &water_mask_image,
         );
 
     let major_network_major_curves_len = major_network_major_curves_unconnected.len();
@@ -187,10 +150,13 @@ async fn main() {
             "water_mask.png",
             street_plan::TraceSeeds::Specific(minor_network_seed_points),
             city_center,
-            5.0,
-            3,
+            |_| 5.0,
+            100.0,
+            50.0,
+            4,
             major_network_curves[..major_network_major_curves_len].to_vec(),
             major_network_curves[major_network_major_curves_len..].to_vec(),
+            &water_mask_image,
         );
 
     let minor_network_curves_unconnected: Vec<HermiteCurve> =
@@ -248,26 +214,138 @@ async fn main() {
         )
         .hide_cursor(true)
         .antialiasing_enabled(true)
+        .features(
+            wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+                | wgpu::Features::POLYGON_MODE_LINE,
+        )
+        .limits(wgpu::Limits {
+            max_bind_groups: 5,
+            ..Default::default()
+        })
         .build()
         .await;
+
+    let sample_factor = 14;
+    let vector_opacity = 0.2;
 
     let rendering_manager = engine.rendering_manager();
     let device = rendering_manager.device();
     let queue = rendering_manager.queue();
 
-    let sample_factor = 14;
-    let vector_opacity = 0.2;
+    let mut visualization_input_image =
+        ImageBuffer::from_pixel(GRID_SIZE, GRID_SIZE, Rgba([0_u8, 0, 0, 255]));
+
+    let mut rng = rand::rng();
+
+    for x in 0..GRID_SIZE {
+        for y in 0..GRID_SIZE {
+            let val1 = (rng.sample::<f32, _>(rand_distr::StandardNormal).abs() * 255.0) as u8;
+            let val2 = (rng.sample::<f32, _>(rand_distr::StandardNormal).abs() * 255.0) as u8;
+            visualization_input_image.put_pixel(x, y, Rgba([val1, val2, 0, 0]));
+        }
+    }
+
+    let visualization_input_texture = Texture::from_bytes(
+        visualization_input_image.as_bytes(),
+        (GRID_SIZE, GRID_SIZE),
+        device,
+        queue,
+        wgpu::TextureFormat::Rgba8Unorm,
+        Some(wgpu::StorageTextureAccess::ReadWrite),
+        false,
+        wgpu::TextureUsages::COPY_DST,
+    );
+
+    let visualization_output_image =
+        ImageBuffer::from_pixel(GRID_SIZE, GRID_SIZE, Rgba([0_u8, 0, 0, 255]));
+
+    let visualization_output_texture = Texture::from_bytes(
+        visualization_output_image.as_bytes(),
+        (GRID_SIZE, GRID_SIZE),
+        device,
+        queue,
+        wgpu::TextureFormat::Rgba8Unorm,
+        Some(wgpu::StorageTextureAccess::ReadWrite),
+        false,
+        wgpu::TextureUsages::COPY_SRC,
+    );
+
+    let mut eigenvector_image = ImageBuffer::new(GRID_SIZE, GRID_SIZE);
+    let smooth_field = |eigenvector: Point| {
+        let field_x = if eigenvector.x >= 0.0 {
+            eigenvector
+        } else {
+            -eigenvector
+        };
+
+        let field_y = if eigenvector.y >= 0.0 {
+            eigenvector
+        } else {
+            -eigenvector
+        };
+
+        let w_x = eigenvector.x * eigenvector.x;
+        let w_y = eigenvector.y * eigenvector.y;
+
+        (field_x * w_x + field_y * w_y) * 255.0
+    };
+
+    for y in 0..GRID_SIZE {
+        for x in 0..GRID_SIZE {
+            let eigenvectors = tensor_field
+                .evaluate_smoothed_field_at_point(Point::new(x as f32, y as f32))
+                .eigenvectors();
+            let major_field = smooth_field(eigenvectors.major.normalize());
+            let minor_field = smooth_field(eigenvectors.minor.normalize());
+
+            eigenvector_image.put_pixel(
+                x,
+                y,
+                Rgba([
+                    major_field.x as u8,
+                    major_field.y as u8,
+                    minor_field.x as u8,
+                    minor_field.y as u8,
+                ]),
+            );
+        }
+    }
+
+    let eigenvector_texture = Texture::from_bytes(
+        eigenvector_image.as_bytes(),
+        (GRID_SIZE, GRID_SIZE),
+        device,
+        queue,
+        wgpu::TextureFormat::Rgba8Unorm,
+        None,
+        false,
+        wgpu::TextureUsages::empty(),
+    );
+
+    let tensorfield_vis_img =
+        ImageBuffer::from_pixel(GRID_SIZE, GRID_SIZE, Rgba([0_u8, 0, 0, 255]));
+    let tensorfield_vis_tex = Texture::from_bytes(
+        tensorfield_vis_img.as_bytes(),
+        (GRID_SIZE, GRID_SIZE),
+        device,
+        queue,
+        wgpu::TextureFormat::Rgba8Unorm,
+        None,
+        true,
+        wgpu::TextureUsages::COPY_DST,
+    );
+
 
     scene! {
         scene: visualizer,
         active_camera: "cam",
-        "eigenvectors" = {
+        /* "eigenvectors" = {
             material: {
                 pipeline: {
                     vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
                     fragment_shader_path: "./shaders/visualizer_fragment.wgsl",
                     vertex_layouts: [LineVertex::vertex_layout(), TransformComponent::vertex_layout::<2>()],
-                    uses_camera: false,
+                    uses_camera: true,
                     geometry_details: {
                         topology: wgpu::PrimitiveTopology::LineList,
                         polygon_mode: wgpu::PolygonMode::Line,
@@ -291,21 +369,21 @@ async fn main() {
                                 LineVertex {pos: [norm_point.x, norm_point.y, 0.0], col: [0.0, 1.0, 0.0, vector_opacity]}, LineVertex {pos: [min_point.x, min_point.y, 0.0], col: [0.0, 1.0, 0.0, vector_opacity]}
                             ]
                         }).collect::<Vec<_>>()).collect(),
-                        water_edge.iter().flat_map(|&(point, dir)| {
+                        /* water_edge.iter().flat_map(|&(point, dir)| {
                             let start = normalize_vector(point);
                             let end = normalize_vector(point + dir.normalize() * 15.0);
                             [
                                 LineVertex {pos: [start.x, start.y, 0.0], col: [1.0, 1.0, 1.0, vector_opacity]},
                                 LineVertex {pos: [end.x, end.y, 0.0], col: [1.0, 1.0, 1.0, vector_opacity]}
                             ]
-                        }).collect()
+                        }).collect() */
                     ],
-                    enabled_models: vec![(0, None), (1, None)]
+                    enabled_models: vec![(0, None)/* , (1, None) */]
                 ),
                 TransformComponent(position: nalgebra::Vector3::zeros())
             ]
-        },
-        /* "tensorfield" = {
+        }, */
+        "field_visualization" = {
             material: {
                 pipeline: {
                     vertex_shader_path: "./shaders/tensorfield_vertex.wgsl",
@@ -315,28 +393,77 @@ async fn main() {
                 },
                 attachments: [
                     Texture(
-                        texture: Texture::from_bytes(
-                            white_noise.as_bytes(),
-                            (GRID_SIZE, GRID_SIZE),
-                            device,
-                            queue,
-                            wgpu::TextureFormat::Rgba8Unorm,
-                            None,
-                            true,
-                            wgpu::TextureUsages::empty()
-                        ),
+                        texture: tensorfield_vis_tex,
                         visibility: wgpu::ShaderStages::FRAGMENT
-                    ),
+                    )
                 ],
+                ident: "vis_mat"
             },
             components: [
                 MeshComponent(
-                    vertices: vec![tiles],
-                    indices: vec![tile_indices],
+                    vertices: vec![
+                        vec![
+                            Vertex {
+                                pos: [-1.0, 1.0, 0.2],
+                                normal: [0.0; 3],
+                                tex_coords: [0.0, 1.0],
+                            },
+                            Vertex {
+                                pos: [-1.0, -1.0, 0.2],
+                                normal: [0.0; 3],
+                                tex_coords: [0.0, 0.0],
+                            },
+                            Vertex {
+                                pos: [1.0, -1.0, 0.2],
+                                normal: [0.0; 3],
+                                tex_coords: [1.0, 0.0],
+                            },
+                            Vertex {
+                                pos: [1.0, 1.0, 0.2],
+                                normal: [0.0; 3],
+                                tex_coords: [1.0, 1.0],
+                            },
+                        ]
+                    ],
+                    indices: vec![
+                        vec![0, 1, 2, 0, 2, 3],
+                    ],
                     enabled_models: vec![(0, None)]
+                ),
+                FieldVisualizationComponent(compute: ident("compute"), material: ident("vis_mat"))
+            ],
+            computes: [
+                Compute(
+                    input: vec![
+                        ShaderAttachment::Texture(ShaderTextureAttachment {
+                            texture: visualization_input_texture,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            extra_usages: wgpu::TextureUsages::empty(),
+                        }),
+                        ShaderAttachment::Texture(ShaderTextureAttachment {
+                            texture: eigenvector_texture,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            extra_usages: wgpu::TextureUsages::empty(),
+                        }),
+                        ShaderAttachment::Buffer(ShaderBufferAttachment::new(
+                            device,
+                            bytemuck::cast_slice(&[0_u32]),
+                            wgpu::BufferBindingType::Uniform,
+                            wgpu::ShaderStages::COMPUTE,
+                            wgpu::BufferUsages::COPY_DST
+                        )),
+                    ],
+                    output: ShaderAttachment::Texture(ShaderTextureAttachment {
+                        texture: visualization_output_texture,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        extra_usages: wgpu::TextureUsages::empty(),
+                    }),
+                    shader_path: "shaders/field_visualization_compute.wgsl",
+                    workgroup_counts: (4, GRID_SIZE, 1),
+                    ident: "compute"
                 )
-            ]
-        }, */
+            ],
+        },
         "major_network" = {
             material: {
                 pipeline: {
@@ -360,11 +487,11 @@ async fn main() {
                                 let next_pos = normalize_vector(arr[i + 1]);
                                 [
                                     LineVertex {
-                                        pos: [ current_pos.x, current_pos.y, 0.0,],
+                                        pos: [ current_pos.x, current_pos.y, 0.0],
                                         col: [0.0, 0.0, 1.0, 1.0]
                                     },
                                     LineVertex {
-                                        pos: [ next_pos.x, next_pos.y, 0.0, ],
+                                        pos: [ next_pos.x, next_pos.y, 0.0,],
                                         col: [0.0, 0.0, 1.0, 1.0]
                                     }
                                 ]
@@ -388,11 +515,11 @@ async fn main() {
                                 let next_pos = normalize_vector(arr[i + 1]);
                                 [
                                     LineVertex {
-                                        pos: [ current_pos.x, current_pos.y, 0.0,],
+                                        pos: [ current_pos.x, current_pos.y, 0.0],
                                         col: [1.0, 0.0, 0.0, 1.0]
                                     },
                                     LineVertex {
-                                        pos: [ next_pos.x, next_pos.y, 0.0, ],
+                                        pos: [ next_pos.x, next_pos.y, 0.0],
                                         col: [1.0, 0.0, 0.0, 1.0]
                                     }
                                 ]

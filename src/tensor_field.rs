@@ -215,9 +215,6 @@ pub trait EvalEigenvectors {
 
 impl EvalEigenvectors for Tensor {
     fn eigenvectors(&self) -> Eigenvectors {
-        if self.eigenvalues().is_none() {
-            dbg!(self);
-        }
         let eigenvalues = self.eigenvalues().unwrap();
         let calc_eigenvector = |eigenvalue: f32| {
             let tensor = self - eigenvalue * Tensor::identity();
@@ -231,10 +228,20 @@ impl EvalEigenvectors for Tensor {
                 Vector2::new(1.0, 1.0)
             }
         };
-        let vectors: [Vector2<f32>; 2] = [
+        let mut vectors: [Vector2<f32>; 2] = [
             calc_eigenvector(eigenvalues[0]),
             calc_eigenvector(eigenvalues[1]),
         ];
+        let up = nalgebra::Vector3::z();
+        if f32::is_infinite(vectors[0].norm()) {
+            vectors[0] = up
+                .cross(&nalgebra::Vector3::new(vectors[1].x, vectors[1].y, 0.0))
+                .xy();
+        } else if f32::is_infinite(vectors[1].norm()) {
+            vectors[1] = up
+                .cross(&nalgebra::Vector3::new(vectors[0].x, vectors[0].y, 0.0))
+                .xy();
+        }
         if eigenvalues[0] > 0.0 {
             Eigenvectors {
                 major: vectors[0],

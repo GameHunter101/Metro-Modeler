@@ -1,7 +1,7 @@
 use core::f32;
 use std::collections::BinaryHeap;
 
-use image::{GenericImageView, Pixel};
+use image::{DynamicImage, GenericImageView, Pixel};
 use nalgebra::Vector2;
 use rand::Rng;
 use rayon::prelude::*;
@@ -199,34 +199,30 @@ pub fn trace_street_plan(
     mask_path: &str,
     seeds: TraceSeeds,
     city_center: Point,
-    d_sep: f32,
+    d_sep: impl Fn(Point) -> f32 + Send + Sync + Clone,
+    max_len: f32,
+    min_len: f32,
     iter_count: usize,
     previous_major_curves: Vec<HermiteCurve>,
     previous_minor_curves: Vec<HermiteCurve>,
+    water_mask: &DynamicImage,
 ) -> (Vec<HermiteCurve>, Vec<HermiteCurve>) {
     let mut seed_points = match seeds {
         TraceSeeds::Random(starting_seed_count) => {
             let seed_points = distribute_points(starting_seed_count, mask_path);
             println!("Seeds: {seed_points:?}");
-            prioritize_points(
-                &seed_points,
-                city_center,
-                &tensor_field,
-            )
+            prioritize_points(&seed_points, city_center, &tensor_field)
         }
         TraceSeeds::Specific(seed_points) => BinaryHeap::from(seed_points),
     };
 
     let prev_major_len = previous_major_curves.len();
     let mut major_curves = previous_major_curves;
-    let prev_minor_len = previous_minor_curves.len();
     let mut minor_curves = previous_minor_curves;
 
-    let d_sep_val = d_sep;
-
+    let d_sep = &d_sep;
     for i in 0..iter_count {
         let h = 0.2;
-        let d_sep = |_point: Point| d_sep_val/*  + (point - city_center).norm() / GRID_SIZE as f32 * 15.0 */;
         let follow_major_eigenvectors = (i % 2) == 0;
 
         let traces = trace_lanes(
@@ -237,9 +233,9 @@ pub fn trace_street_plan(
                 .collect::<Vec<_>>(),
             tensor_field,
             h,
-            d_sep.clone(),
+            d_sep,
             follow_major_eigenvectors,
-            200.0,
+            max_len,
             if follow_major_eigenvectors {
                 &major_curves
             } else {
@@ -262,7 +258,8 @@ pub fn trace_street_plan(
                 &minor_curves
             },
             d_sep,
-            d_sep_val * 2.0,
+            min_len,
+            water_mask,
         )
         .into_iter()
         .unzip();
@@ -292,7 +289,7 @@ fn trace_lanes(
     seeds: Vec<(usize, Point)>,
     tensor_field: &TensorField,
     h: f32,
-    d_sep: impl Fn(Point) -> f32 + Send + Sync + Clone,
+    d_sep: &(impl Fn(Point) -> f32 + Send + Sync + Clone),
     follow_major_eigenvectors: bool,
     max_len: f32,
     previous_curves: &[HermiteCurve],
@@ -663,6 +660,7 @@ fn clip_pass(
     previous_curves: &[HermiteCurve],
     d_sep: impl Fn(Point) -> f32,
     min_length: f32,
+    water_mask: &DynamicImage,
 ) -> Vec<(HermiteCurve, Vec<Point>)> {
     (1..curve_paths.len())
         .flat_map(|curve_index| {
@@ -693,6 +691,14 @@ fn clip_pass(
             let mut clipped_index = 0;
             for (i, dist_squared) in control_point_distances_squared.iter().enumerate() {
                 let d_sep_val = d_sep(current_curve[i].position);
+                let pos = Vector2::new(
+                    (current_curve[i].position.x as u32).clamp(0, GRID_SIZE - 1),
+                    (current_curve[i].position.y as u32).clamp(0, GRID_SIZE - 1),
+                );
+                if water_mask.get_pixel(pos.x, pos.y).to_luma().0[0] != 0 {
+                    break;
+                }
+
                 if *dist_squared >= d_sep_val * d_sep_val {
                     clipped_index += 1;
                 } else {

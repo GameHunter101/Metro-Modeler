@@ -225,7 +225,7 @@ dependencies = [
  "num-traits",
  "pastey",
  "rayon",
- "thiserror 2.0.17",
+ "thiserror 2.0.18",
  "v_frame",
  "y4m",
 ]
@@ -744,9 +744,9 @@ dependencies = [
 
 [[package]]
 name = "euclid"
-version = "0.22.11"
+version = "0.22.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad9cdb4b747e485a12abb0e6566612956c7a1bafa3bdb8d682c5b6d403589e48"
+checksum = "df61bf483e837f88d5c2291dcf55c67be7e676b3a51acc48db3a7b163b91ed63"
 dependencies = [
  "num-traits",
 ]
@@ -1193,7 +1193,7 @@ dependencies = [
  "rgb",
  "tiff",
  "zune-core 0.5.1",
- "zune-jpeg 0.5.9",
+ "zune-jpeg 0.5.11",
 ]
 
 [[package]]
@@ -1470,9 +1470,10 @@ dependencies = [
 
 [[package]]
 name = "metro_modeler"
-version = "0.2.28"
+version = "0.2.29"
 dependencies = [
  "async-scoped",
+ "async-trait",
  "bytemuck",
  "cool_utils",
  "dyn-clone",
@@ -1541,7 +1542,7 @@ dependencies = [
  "spirv",
  "strum",
  "termcolor",
- "thiserror 2.0.17",
+ "thiserror 2.0.18",
  "unicode-xid",
 ]
 
@@ -2097,7 +2098,7 @@ dependencies = [
  "rand",
  "rand_chacha",
  "simd_helpers",
- "thiserror 2.0.17",
+ "thiserror 2.0.18",
  "v_frame",
  "wasm-bindgen",
 ]
@@ -2612,11 +2613,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.17"
+version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f63587ca0f12b72a0600bcba1d40081f830876000bb46dd2337a3051618f4fc8"
+checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
 dependencies = [
- "thiserror-impl 2.0.17",
+ "thiserror-impl 2.0.18",
 ]
 
 [[package]]
@@ -2632,9 +2633,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.17"
+version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ff15c8ecd7de3849db632e14d18d2571fa09dfc5ed93479bc4485c7a517c913"
+checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2848,8 +2849,8 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "v4"
-version = "0.2.53"
-source = "git+https://github.com/GameHunter101/V4-Engine#8ddf366f885d13ce15f4abb9cd555f49828daf8f"
+version = "0.2.54"
+source = "git+https://github.com/GameHunter101/V4-Engine#6c055286749621ade1f6a13c01eba66179e28db2"
 dependencies = [
  "algoe",
  "async-trait",
@@ -2867,8 +2868,8 @@ dependencies = [
 
 [[package]]
 name = "v4-core"
-version = "0.2.53"
-source = "git+https://github.com/GameHunter101/V4-Engine#8ddf366f885d13ce15f4abb9cd555f49828daf8f"
+version = "0.2.54"
+source = "git+https://github.com/GameHunter101/V4-Engine#6c055286749621ade1f6a13c01eba66179e28db2"
 dependencies = [
  "async-scoped",
  "async-trait",
@@ -2892,7 +2893,7 @@ dependencies = [
 [[package]]
 name = "v4-macros"
 version = "0.1.0"
-source = "git+https://github.com/GameHunter101/V4-Engine#8ddf366f885d13ce15f4abb9cd555f49828daf8f"
+source = "git+https://github.com/GameHunter101/V4-Engine#6c055286749621ade1f6a13c01eba66179e28db2"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -3194,7 +3195,7 @@ dependencies = [
  "raw-window-handle",
  "rustc-hash 1.1.0",
  "smallvec",
- "thiserror 2.0.17",
+ "thiserror 2.0.18",
  "wgpu-hal",
  "wgpu-types",
 ]
@@ -3237,7 +3238,7 @@ dependencies = [
  "renderdoc-sys",
  "rustc-hash 1.1.0",
  "smallvec",
- "thiserror 2.0.17",
+ "thiserror 2.0.18",
  "wasm-bindgen",
  "web-sys",
  "wgpu-types",
@@ -3840,9 +3841,9 @@ dependencies = [
 
 [[package]]
 name = "zune-jpeg"
-version = "0.5.9"
+version = "0.5.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87c86acb70a85b2c16f071f171847d1945e8f44812630463cd14ec83900ad01c"
+checksum = "2959ca473aae96a14ecedf501d20b3608d2825ba280d5adb57d651721885b0c2"
 dependencies = [
  "zune-core 0.5.1",
 ]
