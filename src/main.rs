@@ -22,6 +22,7 @@ use wgpu::util::DeviceExt;
 use wgpu::vertex_attr_array;
 
 use crate::field_visualization_component::FieldVisualizationComponent;
+use crate::tensor_field::Tensor;
 use crate::{
     building_generation::footprint_to_building, tensor_field::EvalEigenvectors,
     triangulation::triangulate_faces, water_mask::mask_to_elements,
@@ -52,7 +53,7 @@ async fn main() {
     };
 
     let radial_element = DesignElement::Radial {
-        center: Point::new(200.0, 200.0),
+        center: Point::new(256.0, 256.0),
     };
 
     let grid_element_3 = DesignElement::Grid {
@@ -86,15 +87,15 @@ async fn main() {
     println!("Water edge length: {}", water_edge.len());
 
     let tensor_field = TensorField::new(
-        /* vec![grid_element, radial_element, grid_element_2, grid_element_3]
-            .into_iter()
-            .chain(edge_elements)
-            .collect(), */
-        edge_elements,
+        vec![grid_element, radial_element, grid_element_2, grid_element_3]
+        .into_iter()
+        .chain(edge_elements)
+        .collect(),
+        // edge_elements,
         0.0004,
     );
 
-    let eigen = tensor_field.evaluate_smoothed_field_at_point(Point::new(100.0, 100.0)).eigenvectors();
+    /* let eigen = tensor_field.evaluate_smoothed_field_at_point(Point::new(100.0, 100.0)).eigenvectors();
     println!("Eigenvectors: {:?}", eigen);
     println!("minor: {:?}", eigen.minor.norm());
 
@@ -176,7 +177,7 @@ async fn main() {
         .map(|curve| resample_curve(curve, 20))
         .collect();
 
-    println!("{}", start_time.elapsed().as_millis() as f32 / 1000.0);
+    println!("{}", start_time.elapsed().as_millis() as f32 / 1000.0); */
 
     /* let all_curves: Vec<HermiteCurve> = minor_network_curves
         .into_iter()
@@ -270,7 +271,10 @@ async fn main() {
         wgpu::TextureUsages::COPY_SRC,
     );
 
-    let mut eigenvector_image = ImageBuffer::new(GRID_SIZE, GRID_SIZE);
+    let mut major_eigenvector_image = ImageBuffer::new(GRID_SIZE, GRID_SIZE);
+    let mut minor_eigenvector_image = ImageBuffer::new(GRID_SIZE, GRID_SIZE);
+    let mut blending_image = ImageBuffer::new(GRID_SIZE, GRID_SIZE);
+
     let smooth_field = |eigenvector: Point| {
         let field_x = if eigenvector.x >= 0.0 {
             eigenvector
@@ -284,10 +288,7 @@ async fn main() {
             -eigenvector
         };
 
-        let w_x = eigenvector.x * eigenvector.x;
-        let w_y = eigenvector.y * eigenvector.y;
-
-        (field_x * w_x + field_y * w_y) * 255.0
+        (field_x * 255.0, field_y * 255.0)
     };
 
     for y in 0..GRID_SIZE {
@@ -295,30 +296,74 @@ async fn main() {
             let eigenvectors = tensor_field
                 .evaluate_smoothed_field_at_point(Point::new(x as f32, y as f32))
                 .eigenvectors();
-            let major_field = smooth_field(eigenvectors.major.normalize());
-            let minor_field = smooth_field(eigenvectors.minor.normalize());
+            let major_eigenvector = eigenvectors.major.normalize();
+            let minor_eigenvector = eigenvectors.minor.normalize();
+            let (major_field_x, major_field_y) = smooth_field(major_eigenvector);
+            let (minor_field_x, minor_field_y) = smooth_field(minor_eigenvector);
 
-            eigenvector_image.put_pixel(
+            major_eigenvector_image.put_pixel(
                 x,
                 y,
                 Rgba([
-                    major_field.x as u8,
-                    major_field.y as u8,
-                    minor_field.x as u8,
-                    minor_field.y as u8,
+                    major_field_x.x as u8,
+                    major_field_x.y as u8,
+                    major_field_y.x as u8,
+                    major_field_y.y as u8,
                 ]),
             );
+
+            minor_eigenvector_image.put_pixel(
+                x,
+                y,
+                Rgba([
+                    minor_field_x.x as u8,
+                    minor_field_x.y as u8,
+                    minor_field_y.x as u8,
+                    minor_field_y.y as u8,
+                ]),
+            );
+
+            let major_w_x = ((major_eigenvector.x * major_eigenvector.x) * 255.0) as u8;
+            let minor_w_x = ((minor_eigenvector.x * minor_eigenvector.x) * 255.0) as u8;
+
+            if x == 148 && y == 264 {
+                println!("Major wx: {major_w_x}, Minor wx: {minor_w_x}");
+            }
+
+            blending_image.put_pixel(x, y, Rgba([major_w_x, minor_w_x, 0, 0]));
         }
     }
 
-    let eigenvector_texture = Texture::from_bytes(
-        eigenvector_image.as_bytes(),
+    let major_eigenvector_texture = Texture::from_bytes(
+        major_eigenvector_image.as_bytes(),
         (GRID_SIZE, GRID_SIZE),
         device,
         queue,
         wgpu::TextureFormat::Rgba8Unorm,
         None,
         false,
+        wgpu::TextureUsages::empty(),
+    );
+
+    let minor_eigenvector_texture = Texture::from_bytes(
+        minor_eigenvector_image.as_bytes(),
+        (GRID_SIZE, GRID_SIZE),
+        device,
+        queue,
+        wgpu::TextureFormat::Rgba8Unorm,
+        None,
+        false,
+        wgpu::TextureUsages::empty(),
+    );
+
+    let blending_texture = Texture::from_bytes(
+        blending_image.as_bytes(),
+        (GRID_SIZE, GRID_SIZE),
+        device,
+        queue,
+        wgpu::TextureFormat::Rgba8Unorm,
+        None,
+        true,
         wgpu::TextureUsages::empty(),
     );
 
@@ -334,7 +379,6 @@ async fn main() {
         true,
         wgpu::TextureUsages::COPY_DST,
     );
-
 
     scene! {
         scene: visualizer,
@@ -395,7 +439,11 @@ async fn main() {
                     Texture(
                         texture: tensorfield_vis_tex,
                         visibility: wgpu::ShaderStages::FRAGMENT
-                    )
+                    ),
+                    Texture(
+                        texture: blending_texture,
+                        visibility: wgpu::ShaderStages::FRAGMENT
+                    ),
                 ],
                 ident: "vis_mat"
             },
@@ -441,10 +489,15 @@ async fn main() {
                             extra_usages: wgpu::TextureUsages::empty(),
                         }),
                         ShaderAttachment::Texture(ShaderTextureAttachment {
-                            texture: eigenvector_texture,
+                            texture: major_eigenvector_texture,
                             visibility: wgpu::ShaderStages::COMPUTE,
                             extra_usages: wgpu::TextureUsages::empty(),
                         }),
+                        /* ShaderAttachment::Texture(ShaderTextureAttachment {
+                            texture: minor_eigenvector_texture,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            extra_usages: wgpu::TextureUsages::empty(),
+                        }), */
                         ShaderAttachment::Buffer(ShaderBufferAttachment::new(
                             device,
                             bytemuck::cast_slice(&[0_u32]),
@@ -464,7 +517,7 @@ async fn main() {
                 )
             ],
         },
-        "major_network" = {
+        /* "major_network" = {
             material: {
                 pipeline: {
                     vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
@@ -529,7 +582,7 @@ async fn main() {
                 ),
                 TransformComponent(position: nalgebra::Vector3::new(0.0, 0.0, 0.0))
             ]
-        },
+        }, */
         /* "plots" = {
             material: {
                 pipeline: {

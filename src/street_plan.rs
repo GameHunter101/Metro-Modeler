@@ -511,38 +511,39 @@ fn smooth_lanes(
     traces
         .into_par_iter()
         .filter(|TraceOutput { path, .. }| !path.is_empty())
-        .map(|TraceOutput { path, new_seeds }| {
-            let smoothed_path = smooth_path(path.clone(), alpha, beta);
-            if smoothed_path.len() == 1 {
-                println!("Prev: {}", path.clone().len());
-            }
+        .flat_map(|TraceOutput { path, new_seeds }| {
+            if path.is_empty() {
+                None
+            } else {
+                let smoothed_path = smooth_path(path.clone(), alpha, beta);
 
-            let mut control_points_indices: Vec<usize> =
+                let mut control_points_indices: Vec<usize> =
                 highest_curvature_points(&smoothed_path, point_side_padding);
 
-            control_points_indices.sort();
+                control_points_indices.sort();
 
-            let curve = control_points_indices
-                .iter()
-                .map(|&index| {
-                    let position = smoothed_path[index];
-                    let velocity = if index == 0 {
-                        (smoothed_path[1] - position) / h_square
-                    } else if index == smoothed_path.len() - 1 {
-                        (smoothed_path[smoothed_path.len() - 1]
+                let curve = control_points_indices
+                    .iter()
+                    .map(|&index| {
+                        let position = smoothed_path[index];
+                        let velocity = if index == 0 {
+                            (smoothed_path[1] - position) / h_square
+                        } else if index == smoothed_path.len() - 1 {
+                            (smoothed_path[smoothed_path.len() - 1]
                             - smoothed_path[smoothed_path.len() - 2])
                             / h_square
-                    } else {
-                        blend_factor
+                        } else {
+                            blend_factor
                             * ((smoothed_path[index + 1] - position) / h_square
-                                + (position - smoothed_path[index - 1]) / h_square)
-                    };
+                            + (position - smoothed_path[index - 1]) / h_square)
+                        };
 
-                    ControlPoint { position, velocity }
-                })
-                .collect::<Vec<_>>();
+                        ControlPoint { position, velocity }
+                    })
+                    .collect::<Vec<_>>();
 
-            SmoothedCurve { curve, new_seeds }
+                Some(SmoothedCurve { curve, new_seeds })
+            }
         })
         .collect()
 }

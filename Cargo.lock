@@ -1470,7 +1470,7 @@ dependencies = [
 
 [[package]]
 name = "metro_modeler"
-version = "0.2.29"
+version = "0.2.31"
 dependencies = [
  "async-scoped",
  "async-trait",

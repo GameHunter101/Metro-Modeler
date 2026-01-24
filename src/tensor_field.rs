@@ -219,14 +219,8 @@ impl EvalEigenvectors for Tensor {
         let calc_eigenvector = |eigenvalue: f32| {
             let tensor = self - eigenvalue * Tensor::identity();
             let [a, b]: [f32; 2] = tensor.row(0).into_owned().into();
-            let [c, d]: [f32; 2] = tensor.row(1).into_owned().into();
             let new_b = b / a;
-            let new_d = d - b / a * c;
-            if new_d <= 0.000001 {
-                Vector2::new(-new_b, 1.0)
-            } else {
-                Vector2::new(1.0, 1.0)
-            }
+            Vector2::new(-new_b, 1.0)
         };
         let mut vectors: [Vector2<f32>; 2] = [
             calc_eigenvector(eigenvalues[0]),

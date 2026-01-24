@@ -1,6 +1,5 @@
 @group(0) @binding(0) var input: texture_storage_2d<rgba8unorm, read_write>;
-@group(1) @binding(0) var eigenvectors: texture_2d<f32>;
-// @group(2) @binding(0) var minor_eigenvectors: texture_2d<f32>;
+@group(1) @binding(0) var major_eigenvector: texture_2d<f32>;
 @group(2) @binding(0) var<uniform> time: u32;
 
 @group(3) @binding(0) var output: texture_storage_2d<rgba8unorm, read_write>;
@@ -25,14 +24,19 @@ fn bilerp(coord: vec2<f32>) -> vec4<f32> {
 @compute
 @workgroup_size(128)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let major_prev_position = vec2f(id.xy) - 0.5 * textureLoad(eigenvectors, id.xy, 0).xy;
-    let major_prev_val = bilerp(major_prev_position).x;
+    let major_dir = textureLoad(major_eigenvector, id.xy, 0);
 
-    let minor_prev_position = vec2f(id.xy) - 0.5 * textureLoad(eigenvectors, id.xy, 0).zw;
-    let minor_prev_val = bilerp(minor_prev_position).y;
+    let epsilon = 0.2;
 
-    let noise_x = 0.05 * mix(-1.0, 1.0, random(id.xy));
-    let noise_y = 0.05 * mix(-1.0, 1.0, random(id.xy * 2));
+    let major_prev_position_x = vec2f(id.xy) - epsilon * major_dir.xy;
+    let major_prev_val_x = bilerp(major_prev_position_x).x;
 
-    textureStore(output, id.xy, vec4f(major_prev_val + noise_x, minor_prev_val + noise_y, 0.0, 1.0));
+    let major_prev_position_y = vec2f(id.xy) - epsilon * major_dir.zw;
+    let major_prev_val_y = bilerp(major_prev_position_y).y;
+
+    let noise = 0.02 * mix(-1.0, 1.0, random(id.xy));
+
+    textureStore(output, id.xy, vec4f(
+        major_prev_val_x + noise, major_prev_val_y + noise, 0.0, 0.0
+    ));
 }
