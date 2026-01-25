@@ -241,7 +241,12 @@ pub fn trace_street_plan(
             } else {
                 &minor_curves
             },
+            water_mask,
         );
+
+        /* for trace in &traces {
+            println!("Out: {:?}", trace.path.len());
+        } */
 
         let pre: usize = traces
             .iter()
@@ -249,6 +254,13 @@ pub fn trace_street_plan(
             .sum();
 
         let curve_paths = smooth_lanes(traces, 0.03, 0.3, 20, h, 0.7);
+
+        /* for path in &curve_paths {
+            if path.curve.len() > 100 {
+                println!("{:?}", path.curve.iter().map(|x| x.position).collect::<Vec<_>>());
+                break;
+            }
+        } */
 
         let (clipped_paths, new_seeds): (Vec<HermiteCurve>, Vec<Vec<Point>>) = clip_pass(
             curve_paths,
@@ -259,10 +271,13 @@ pub fn trace_street_plan(
             },
             d_sep,
             min_len,
-            water_mask,
         )
         .into_iter()
         .unzip();
+
+        /* for path in &clipped_paths {
+            println!("Clipped length: {}", path.len());
+        } */
 
         println!("Pre: {pre}, post: {}", new_seeds.len());
 
@@ -293,6 +308,7 @@ fn trace_lanes(
     follow_major_eigenvectors: bool,
     max_len: f32,
     previous_curves: &[HermiteCurve],
+    water_mask: &DynamicImage,
 ) -> Vec<TraceOutput> {
     let unordered_traces: Vec<(usize, TraceOutput)> = seeds
         .into_par_iter()
@@ -308,6 +324,7 @@ fn trace_lanes(
                     follow_major_eigenvectors,
                     max_len,
                     previous_curves,
+                    water_mask,
                 ),
             )
         })
@@ -342,6 +359,7 @@ fn trace(
     follow_major_eigenvectors: bool,
     max_len: f32,
     previous_curves: &[HermiteCurve],
+    water_mask: &DynamicImage,
 ) -> TraceOutput {
     let origin = seed;
     let mut seed = seed;
@@ -354,19 +372,16 @@ fn trace(
     let mut new_seeds = vec![];
     let mut steps = 0;
 
-    let clamp_vel = |vel: Vector2<f32>| {
-        clamp_vector_between_points(
-            Vector2::new(-(GRID_SIZE as f32), -(GRID_SIZE as f32)),
-            Vector2::new(GRID_SIZE as f32, GRID_SIZE as f32),
-            vel,
-        )
-    };
-
     if closest_distance_to_curves <= 0.0 {
         return TraceOutput::default();
     }
 
     while !(seed.x < 0.0 || seed.y < 0.0 || seed.x > GRID_SIZE as f32 || seed.y > GRID_SIZE as f32)
+        && water_mask
+            .get_pixel(seed.x as u32, GRID_SIZE - seed.y as u32)
+            .to_luma()
+            .0[0]
+            == 0
     {
         let tensor = tensor_field.evaluate_smoothed_field_at_point(seed);
 
@@ -374,42 +389,50 @@ fn trace(
             break;
         }
 
+        if tensor.eigenvalues().is_none() {
+            println!("Invalid at {seed}");
+        }
+
         let k_1_eigenvectors = tensor.eigenvectors();
         let k_1 = branchless_if(
-            clamp_vel(k_1_eigenvectors.major),
-            clamp_vel(k_1_eigenvectors.minor),
-            follow_major_eigenvectors,
-        )
-        .normalize();
-        let k_2_eigenvectors = tensor_field
-            .evaluate_smoothed_field_at_point(clamp_vec_to_grid(seed + h / 2.0 * k_1))
-            .eigenvectors();
-        let k_2 = branchless_if(
-            clamp_vel(k_2_eigenvectors.major),
-            clamp_vel(k_2_eigenvectors.minor),
-            follow_major_eigenvectors,
-        )
-        .normalize();
-        let k_3_eigenvectors = tensor_field
-            .evaluate_smoothed_field_at_point(clamp_vec_to_grid(seed + h / 2.0 * k_2))
-            .eigenvectors();
-        let k_3 = branchless_if(
-            clamp_vel(k_3_eigenvectors.major),
-            clamp_vel(k_3_eigenvectors.minor),
-            follow_major_eigenvectors,
-        )
-        .normalize();
-        let k_4_eigenvectors = tensor_field
-            .evaluate_smoothed_field_at_point(clamp_vec_to_grid(seed + h * k_3))
-            .eigenvectors();
-        let k_4 = branchless_if(
-            clamp_vel(k_4_eigenvectors.major),
-            clamp_vel(k_4_eigenvectors.minor),
+            k_1_eigenvectors.major.normalize(),
+            k_1_eigenvectors.minor.normalize(),
             follow_major_eigenvectors,
         )
         .normalize();
 
-        let m = 1.0 / 6.0 * k_1 + 1.0 / 3.0 * k_2 + 1.0 / 3.0 * k_3 + 1.0 / 6.0 * k_4;
+        let k_2_eigenvectors = tensor_field
+            .evaluate_smoothed_field_at_point(clamp_vec_to_grid(seed + h / 2.0 * k_1))
+            .eigenvectors();
+
+        let k_2 = branchless_if(
+            k_2_eigenvectors.major.normalize(),
+            k_2_eigenvectors.minor.normalize(),
+            follow_major_eigenvectors,
+        )
+        .normalize();
+
+        let k_3_eigenvectors = tensor_field
+            .evaluate_smoothed_field_at_point(clamp_vec_to_grid(seed + h / 2.0 * k_2))
+            .eigenvectors();
+        let k_3 = branchless_if(
+            k_3_eigenvectors.major.normalize(),
+            k_3_eigenvectors.minor.normalize(),
+            follow_major_eigenvectors,
+        )
+        .normalize();
+
+        let k_4_eigenvectors = tensor_field
+            .evaluate_smoothed_field_at_point(clamp_vec_to_grid(seed + h * k_3))
+            .eigenvectors();
+        let k_4 = branchless_if(
+            k_4_eigenvectors.major.normalize(),
+            k_4_eigenvectors.minor.normalize(),
+            follow_major_eigenvectors,
+        )
+        .normalize();
+
+        let m = (1.0 / 6.0 * k_1 + 1.0 / 3.0 * k_2 + 1.0 / 3.0 * k_3 + 1.0 / 6.0 * k_4).normalize();
 
         let new_pos = seed + h * m;
         let dist = (new_pos - seed).norm();
@@ -518,7 +541,7 @@ fn smooth_lanes(
                 let smoothed_path = smooth_path(path.clone(), alpha, beta);
 
                 let mut control_points_indices: Vec<usize> =
-                highest_curvature_points(&smoothed_path, point_side_padding);
+                    highest_curvature_points(&smoothed_path, point_side_padding);
 
                 control_points_indices.sort();
 
@@ -530,12 +553,12 @@ fn smooth_lanes(
                             (smoothed_path[1] - position) / h_square
                         } else if index == smoothed_path.len() - 1 {
                             (smoothed_path[smoothed_path.len() - 1]
-                            - smoothed_path[smoothed_path.len() - 2])
-                            / h_square
+                                - smoothed_path[smoothed_path.len() - 2])
+                                / h_square
                         } else {
                             blend_factor
-                            * ((smoothed_path[index + 1] - position) / h_square
-                            + (position - smoothed_path[index - 1]) / h_square)
+                                * ((smoothed_path[index + 1] - position) / h_square
+                                    + (position - smoothed_path[index - 1]) / h_square)
                         };
 
                         ControlPoint { position, velocity }
@@ -661,7 +684,6 @@ fn clip_pass(
     previous_curves: &[HermiteCurve],
     d_sep: impl Fn(Point) -> f32,
     min_length: f32,
-    water_mask: &DynamicImage,
 ) -> Vec<(HermiteCurve, Vec<Point>)> {
     (1..curve_paths.len())
         .flat_map(|curve_index| {
@@ -692,13 +714,13 @@ fn clip_pass(
             let mut clipped_index = 0;
             for (i, dist_squared) in control_point_distances_squared.iter().enumerate() {
                 let d_sep_val = d_sep(current_curve[i].position);
-                let pos = Vector2::new(
+                /* let pos = Vector2::new(
                     (current_curve[i].position.x as u32).clamp(0, GRID_SIZE - 1),
                     (current_curve[i].position.y as u32).clamp(0, GRID_SIZE - 1),
                 );
                 if water_mask.get_pixel(pos.x, pos.y).to_luma().0[0] != 0 {
                     break;
-                }
+                } */
 
                 if *dist_squared >= d_sep_val * d_sep_val {
                     clipped_index += 1;

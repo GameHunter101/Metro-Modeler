@@ -395,9 +395,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.53"
+version = "1.2.54"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "755d2fce177175ffca841e9a06afdb2c4ab0f593d53b4dee48147dfaade85932"
+checksum = "6354c81bbfd62d9cfa9cb3c773c2b7b2a3a482d569de977fd0e961f6e7c00583"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -1346,9 +1346,9 @@ dependencies = [
 
 [[package]]
 name = "libm"
-version = "0.2.15"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libredox"
@@ -1489,6 +1489,7 @@ dependencies = [
  "tokio",
  "v4",
  "wgpu",
+ "winit",
 ]
 
 [[package]]
@@ -1943,9 +1944,9 @@ dependencies = [
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.105"
+version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "535d180e0ecab6268a3e718bb9fd44db66bbbc256257165fc699dadf70d16fe7"
+checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
 ]
@@ -2004,9 +2005,9 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.43"
+version = "1.0.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc74d9a594b72ae6656596548f56f667211f8a97b3d4c3d467150794690dc40a"
+checksum = "21b2ebcf727b7760c461f091f9f0f539b77b8e87f2fd88131e7f1b433b3cece4"
 dependencies = [
  "proc-macro2",
 ]
@@ -2493,9 +2494,9 @@ dependencies = [
 
 [[package]]
 name = "socket2"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17129e116933cf371d018bb80ae557e889637989d8638274fb25622827b03881"
+checksum = "86f4aa3ad99f2088c990dfa82d367e19cb29268ed67c574d10d0a4bfe71f07e0"
 dependencies = [
  "libc",
  "windows-sys 0.60.2",
@@ -2849,8 +2850,8 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "v4"
-version = "0.2.54"
-source = "git+https://github.com/GameHunter101/V4-Engine#6c055286749621ade1f6a13c01eba66179e28db2"
+version = "0.2.55"
+source = "git+https://github.com/GameHunter101/V4-Engine#4ef44f29357dccd88ad696fc53d2534ca360fb3c"
 dependencies = [
  "algoe",
  "async-trait",
@@ -2868,8 +2869,8 @@ dependencies = [
 
 [[package]]
 name = "v4-core"
-version = "0.2.54"
-source = "git+https://github.com/GameHunter101/V4-Engine#6c055286749621ade1f6a13c01eba66179e28db2"
+version = "0.2.55"
+source = "git+https://github.com/GameHunter101/V4-Engine#4ef44f29357dccd88ad696fc53d2534ca360fb3c"
 dependencies = [
  "async-scoped",
  "async-trait",
@@ -2893,7 +2894,7 @@ dependencies = [
 [[package]]
 name = "v4-macros"
 version = "0.1.0"
-source = "git+https://github.com/GameHunter101/V4-Engine#6c055286749621ade1f6a13c01eba66179e28db2"
+source = "git+https://github.com/GameHunter101/V4-Engine#4ef44f29357dccd88ad696fc53d2534ca360fb3c"
 dependencies = [
  "darling",
  "proc-macro2",

@@ -1,4 +1,5 @@
 use nalgebra::{Matrix2, Vector2};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 pub const GRID_SIZE: u32 = 512;
 
@@ -19,16 +20,21 @@ impl TensorField {
         let mut grid = vec![Tensor::default(); (GRID_SIZE * GRID_SIZE) as usize].into_boxed_slice();
 
         let design_elements_ref = &design_elements;
+        // std::thread::scope(|scope| {
         async_scoped::TokioScope::scope_and_block(|scope| {
-            for (row, chunk) in grid.chunks_mut(GRID_SIZE as usize).enumerate() {
+            let chunk_size = GRID_SIZE as usize * 2;
+            for (chunk_index, chunk) in grid.chunks_mut(chunk_size).enumerate() {
                 scope.spawn(async move {
-                    for col in 0..GRID_SIZE as usize {
-                        chunk[col] = Self::calculate_smoothed_field_at_point(
+                    let new_chunk: Vec<Tensor> = (0..chunk_size).into_par_iter().map(|offset| {
+                        let row = (chunk_index * chunk_size + offset) / GRID_SIZE as usize;
+                        let col = (chunk_index * chunk_size + offset) % GRID_SIZE as usize;
+                        Self::calculate_smoothed_field_at_point(
                             Point::new(col as f32, row as f32),
                             design_elements_ref,
                             decay_constant,
                         )
-                    }
+                    }).collect();
+                    chunk.copy_from_slice(&new_chunk);
                 });
             }
         });
@@ -97,12 +103,13 @@ impl TensorField {
             count += 1;
         }
 
-        sum += neighbors
+        /* sum += neighbors
             .into_iter()
             .map(|vec| Self::calculate_field_at_point(point + vec, design_elements, decay_constant))
             .sum::<Tensor>();
 
-        sum / count as f32
+        sum / count as f32 */
+        sum
     }
 
     pub fn evaluate_smoothed_field_at_point(&self, point: Point) -> Tensor {
@@ -215,11 +222,14 @@ pub trait EvalEigenvectors {
 
 impl EvalEigenvectors for Tensor {
     fn eigenvectors(&self) -> Eigenvectors {
-        let eigenvalues = self.eigenvalues().unwrap();
+        let eigenvalues = self
+            .eigenvalues()
+            .unwrap_or_else(|| panic!("No eigenvalues for {self}"));
         let calc_eigenvector = |eigenvalue: f32| {
             let tensor = self - eigenvalue * Tensor::identity();
             let [a, b]: [f32; 2] = tensor.row(0).into_owned().into();
             let new_b = b / a;
+
             Vector2::new(-new_b, 1.0)
         };
         let mut vectors: [Vector2<f32>; 2] = [
@@ -227,11 +237,11 @@ impl EvalEigenvectors for Tensor {
             calc_eigenvector(eigenvalues[1]),
         ];
         let up = nalgebra::Vector3::z();
-        if f32::is_infinite(vectors[0].norm()) {
+        if f32::is_infinite(vectors[0].norm()) || vectors[0].x.is_nan() {
             vectors[0] = up
                 .cross(&nalgebra::Vector3::new(vectors[1].x, vectors[1].y, 0.0))
                 .xy();
-        } else if f32::is_infinite(vectors[1].norm()) {
+        } else if f32::is_infinite(vectors[1].norm()) || vectors[1].x.is_nan() {
             vectors[1] = up
                 .cross(&nalgebra::Vector3::new(vectors[0].x, vectors[0].y, 0.0))
                 .xy();

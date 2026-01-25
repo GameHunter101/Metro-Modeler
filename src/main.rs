@@ -22,7 +22,6 @@ use wgpu::util::DeviceExt;
 use wgpu::vertex_attr_array;
 
 use crate::field_visualization_component::FieldVisualizationComponent;
-use crate::tensor_field::Tensor;
 use crate::{
     building_generation::footprint_to_building, tensor_field::EvalEigenvectors,
     triangulation::triangulate_faces, water_mask::mask_to_elements,
@@ -46,17 +45,11 @@ async fn main() {
         length: 100.0,
     };
 
-    let grid_element_2 = DesignElement::Grid {
-        center: Point::new(300.0, 400.0),
-        theta: 0.1,
-        length: 200.0,
-    };
-
     let radial_element = DesignElement::Radial {
         center: Point::new(256.0, 256.0),
     };
 
-    let grid_element_3 = DesignElement::Grid {
+    let grid_element_2 = DesignElement::Grid {
         center: Point::new(0.0, 400.0),
         theta: 0.7,
         length: 10.0,
@@ -87,17 +80,14 @@ async fn main() {
     println!("Water edge length: {}", water_edge.len());
 
     let tensor_field = TensorField::new(
-        vec![grid_element, radial_element, grid_element_2, grid_element_3]
+        vec![grid_element, radial_element, grid_element_2]
         .into_iter()
         .chain(edge_elements)
         .collect(),
-        // edge_elements,
         0.0004,
     );
 
-    /* let eigen = tensor_field.evaluate_smoothed_field_at_point(Point::new(100.0, 100.0)).eigenvectors();
-    println!("Eigenvectors: {:?}", eigen);
-    println!("minor: {:?}", eigen.minor.norm());
+    println!("Field creation: {}", start_time.elapsed().as_millis() as f32 / 1000.0);
 
     let (major_network_major_curves_unconnected, major_network_minor_curves_unconnected) =
         trace_street_plan(
@@ -177,9 +167,9 @@ async fn main() {
         .map(|curve| resample_curve(curve, 20))
         .collect();
 
-    println!("{}", start_time.elapsed().as_millis() as f32 / 1000.0); */
+    println!("{}", start_time.elapsed().as_millis() as f32 / 1000.0);
 
-    /* let all_curves: Vec<HermiteCurve> = minor_network_curves
+    let all_curves: Vec<HermiteCurve> = minor_network_curves
         .into_iter()
         .chain(major_network_curves)
         .collect();
@@ -203,7 +193,7 @@ async fn main() {
         .collect();
 
     let triangulated_faces = triangulate_faces(&faces);
-    let verts_for_triangulation: Vec<Vertex> = faces.into_iter().flatten().collect(); */
+    let verts_for_triangulation: Vec<Vertex> = faces.into_iter().flatten().collect();
 
     let mut engine = v4::V4::builder()
         .features(wgpu::Features::POLYGON_MODE_LINE | wgpu::Features::POLYGON_MODE_POINT)
@@ -240,8 +230,8 @@ async fn main() {
 
     for x in 0..GRID_SIZE {
         for y in 0..GRID_SIZE {
-            let val1 = (rng.sample::<f32, _>(rand_distr::StandardNormal).abs() * 255.0) as u8;
-            let val2 = (rng.sample::<f32, _>(rand_distr::StandardNormal).abs() * 255.0) as u8;
+            let val1 = rng.random();
+            let val2 = rng.random();
             visualization_input_image.put_pixel(x, y, Rgba([val1, val2, 0, 0]));
         }
     }
@@ -326,10 +316,6 @@ async fn main() {
             let major_w_x = ((major_eigenvector.x * major_eigenvector.x) * 255.0) as u8;
             let minor_w_x = ((minor_eigenvector.x * minor_eigenvector.x) * 255.0) as u8;
 
-            if x == 148 && y == 264 {
-                println!("Major wx: {major_w_x}, Minor wx: {minor_w_x}");
-            }
-
             blending_image.put_pixel(x, y, Rgba([major_w_x, minor_w_x, 0, 0]));
         }
     }
@@ -383,7 +369,7 @@ async fn main() {
     scene! {
         scene: visualizer,
         active_camera: "cam",
-        /* "eigenvectors" = {
+        "eigenvectors" = {
             material: {
                 pipeline: {
                     vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
@@ -399,7 +385,7 @@ async fn main() {
             components: [
                 MeshComponent(
                     vertices: vec![
-                        (0..GRID_SIZE / sample_factor).flat_map(|x| (0..GRID_SIZE / sample_factor).flat_map(|y| {
+                        /* (0..GRID_SIZE / sample_factor).flat_map(|x| (0..GRID_SIZE / sample_factor).flat_map(|y| {
                             let point = Point::new(x as f32 * sample_factor as f32, y as f32 * sample_factor as f32);
                             let tensor = tensor_field.evaluate_smoothed_field_at_point(point);
                             let eigenvectors = tensor.eigenvectors();
@@ -412,21 +398,21 @@ async fn main() {
                                 LineVertex {pos: [norm_point.x, norm_point.y, 0.0], col: [1.0, 0.0, 0.0, vector_opacity]}, LineVertex {pos: [maj_point.x, maj_point.y, 0.0], col: [1.0, 0.0, 0.0, vector_opacity]},
                                 LineVertex {pos: [norm_point.x, norm_point.y, 0.0], col: [0.0, 1.0, 0.0, vector_opacity]}, LineVertex {pos: [min_point.x, min_point.y, 0.0], col: [0.0, 1.0, 0.0, vector_opacity]}
                             ]
-                        }).collect::<Vec<_>>()).collect(),
-                        /* water_edge.iter().flat_map(|&(point, dir)| {
+                        }).collect::<Vec<_>>()).collect(), */
+                        water_edge.iter().flat_map(|&(point, dir)| {
                             let start = normalize_vector(point);
                             let end = normalize_vector(point + dir.normalize() * 15.0);
                             [
                                 LineVertex {pos: [start.x, start.y, 0.0], col: [1.0, 1.0, 1.0, vector_opacity]},
                                 LineVertex {pos: [end.x, end.y, 0.0], col: [1.0, 1.0, 1.0, vector_opacity]}
                             ]
-                        }).collect() */
+                        }).collect()
                     ],
                     enabled_models: vec![(0, None)/* , (1, None) */]
                 ),
                 TransformComponent(position: nalgebra::Vector3::zeros())
             ]
-        }, */
+        },
         "field_visualization" = {
             material: {
                 pipeline: {
@@ -493,11 +479,11 @@ async fn main() {
                             visibility: wgpu::ShaderStages::COMPUTE,
                             extra_usages: wgpu::TextureUsages::empty(),
                         }),
-                        /* ShaderAttachment::Texture(ShaderTextureAttachment {
+                        ShaderAttachment::Texture(ShaderTextureAttachment {
                             texture: minor_eigenvector_texture,
                             visibility: wgpu::ShaderStages::COMPUTE,
                             extra_usages: wgpu::TextureUsages::empty(),
-                        }), */
+                        }),
                         ShaderAttachment::Buffer(ShaderBufferAttachment::new(
                             device,
                             bytemuck::cast_slice(&[0_u32]),
@@ -517,7 +503,7 @@ async fn main() {
                 )
             ],
         },
-        /* "major_network" = {
+        "major_network" = {
             material: {
                 pipeline: {
                     vertex_shader_path: "./shaders/visualizer_vertex.wgsl",
@@ -582,7 +568,7 @@ async fn main() {
                 ),
                 TransformComponent(position: nalgebra::Vector3::new(0.0, 0.0, 0.0))
             ]
-        }, */
+        },
         /* "plots" = {
             material: {
                 pipeline: {

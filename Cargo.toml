@@ -1,6 +1,6 @@
 [package]
 name = "metro_modeler"
-version = "0.2.31"
+version = "0.2.32"
 edition = "2024"
 
 [dependencies]
@@ -21,3 +21,4 @@ cool_utils = { git = "https://github.com/GameHunter101/cool_utils" }
 dyn-clone = "1.0.20"
 rand_distr = "0.5.1"
 async-trait = "0.1.89"
+winit = "0.29.15"

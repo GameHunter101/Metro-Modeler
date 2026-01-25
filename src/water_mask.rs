@@ -30,7 +30,7 @@ fn mask_faces(img: &DynamicImage) -> (Vec<Point>, DCEL) {
             }
 
             if (x_diff != 0 || y_diff != 0) && pix_luma == 255 {
-                Some(Point::new(x as f32, y as f32))
+                Some(Point::new(x as f32, (crate::tensor_field::GRID_SIZE - y) as f32))
             } else {
                 None
             }
@@ -75,7 +75,7 @@ pub fn mask_to_elements(
             face.iter().enumerate().flat_map(|(i, &point_idx)| {
                 if i % skip_factor == 0 {
                     let dir = points[face[(i + skip_factor) % face.len()]] - points[point_idx];
-                    let theta = dir.y.atan2(dir.x); // + std::f32::consts::FRAC_PI_2;
+                    let theta = dir.y.atan2(dir.x) + std::f32::consts::FRAC_PI_2;
                     Some((
                         (points[point_idx], dir),
                         DesignElement::Grid {
