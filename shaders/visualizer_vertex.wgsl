@@ -35,7 +35,7 @@ fn main(input: VertexInput, transform: TransformData) -> VertexOutput {
 
     var out: VertexOutput;
     // out.pos = camera.mat * (transform_mat * vec4f(input.position, 1.0));
-    out.pos = vec4f(input.position, 1.0);
+    out.pos = transform_mat * vec4f(input.position, 1.0);
     out.col = input.col;
     return out;
 }

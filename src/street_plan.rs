@@ -8,15 +8,10 @@ use rayon::prelude::*;
 
 use crate::tensor_field::{EvalEigenvectors, GRID_SIZE, Point, TensorField};
 
-pub fn distribute_points(point_count: u32, mask_path: &str) -> Vec<Point> {
+pub fn distribute_points(point_count: u32, mask: &DynamicImage) -> Vec<Point> {
     let mut rand = rand::rng();
 
     let mut points = Vec::new();
-
-    let mask = image::ImageReader::open(mask_path)
-        .unwrap()
-        .decode()
-        .unwrap();
 
     while (points.len() as u32) < point_count {
         let candidates: Vec<Point> = (0..10)
@@ -80,7 +75,7 @@ impl Ord for SeedPoint {
 
 pub fn prioritize_points(
     points: &[Point],
-    city_center: Point,
+    city_center: Option<Point>,
     tensor_field: &TensorField,
 ) -> BinaryHeap<SeedPoint> {
     points
@@ -90,7 +85,11 @@ pub fn prioritize_points(
             if eigenvectors.norm() <= 0.0001 {
                 None
             } else {
-                let city_center_priority = (-(city_center - point).magnitude()).exp();
+                let city_center_priority = if let Some(city_center) = city_center {
+                    (-(city_center - point).magnitude()).exp()
+                } else {
+                    0.0
+                };
                 let degenerate_point_priority =
                     (-closest_degenerate_point_distance(*point, tensor_field)).exp();
 
@@ -194,22 +193,53 @@ pub fn heap_to_vec<T: Clone + Ord>(heap: BinaryHeap<T>) -> Vec<T> {
     res
 }
 
+pub trait FnClone: dyn_clone::DynClone + Send + Sync {
+    fn call(&self, point: Point) -> f32;
+}
+
+dyn_clone::clone_trait_object!(FnClone);
+
+impl<F> FnClone for F
+        where F: Fn(Point) -> f32 + Send + Sync + Clone {
+    fn call(&self, point: Point) -> f32 {
+        self(point)
+    }
+}
+
+#[derive(Clone)]
+pub struct DSepFunc {
+    pub fp: Box<dyn FnClone + Send + Sync>,
+}
+
+impl DSepFunc {
+    pub fn new(fp: Box<dyn FnClone + Send + Sync>) -> DSepFunc {
+        DSepFunc {
+            fp,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct TraceParams {
+    pub d_sep: DSepFunc,
+    pub max_len: f32,
+    pub min_len: f32,
+    pub iter_count: usize,
+}
+
 pub fn trace_street_plan(
+    params: TraceParams,
     tensor_field: &TensorField,
-    mask_path: &str,
+    mask: &DynamicImage,
     seeds: TraceSeeds,
-    city_center: Point,
-    d_sep: impl Fn(Point) -> f32 + Send + Sync + Clone,
-    max_len: f32,
-    min_len: f32,
-    iter_count: usize,
+    city_center: Option<Point>,
     previous_major_curves: Vec<HermiteCurve>,
     previous_minor_curves: Vec<HermiteCurve>,
     water_mask: &DynamicImage,
 ) -> (Vec<HermiteCurve>, Vec<HermiteCurve>) {
     let mut seed_points = match seeds {
         TraceSeeds::Random(starting_seed_count) => {
-            let seed_points = distribute_points(starting_seed_count, mask_path);
+            let seed_points = distribute_points(starting_seed_count, mask);
             println!("Seeds: {seed_points:?}");
             prioritize_points(&seed_points, city_center, &tensor_field)
         }
@@ -220,8 +250,8 @@ pub fn trace_street_plan(
     let mut major_curves = previous_major_curves;
     let mut minor_curves = previous_minor_curves;
 
-    let d_sep = &d_sep;
-    for i in 0..iter_count {
+    for i in 0..params.iter_count {
+        let d_sep = params.d_sep.clone();
         let h = 0.2;
         let follow_major_eigenvectors = (i % 2) == 0;
 
@@ -233,9 +263,9 @@ pub fn trace_street_plan(
                 .collect::<Vec<_>>(),
             tensor_field,
             h,
-            d_sep,
+            d_sep.clone(),
             follow_major_eigenvectors,
-            max_len,
+            params.max_len,
             if follow_major_eigenvectors {
                 &major_curves
             } else {
@@ -244,23 +274,12 @@ pub fn trace_street_plan(
             water_mask,
         );
 
-        /* for trace in &traces {
-            println!("Out: {:?}", trace.path.len());
-        } */
-
         let pre: usize = traces
             .iter()
             .map(|TraceOutput { new_seeds, .. }| new_seeds.len())
             .sum();
 
         let curve_paths = smooth_lanes(traces, 0.03, 0.3, 20, h, 0.7);
-
-        /* for path in &curve_paths {
-            if path.curve.len() > 100 {
-                println!("{:?}", path.curve.iter().map(|x| x.position).collect::<Vec<_>>());
-                break;
-            }
-        } */
 
         let (clipped_paths, new_seeds): (Vec<HermiteCurve>, Vec<Vec<Point>>) = clip_pass(
             curve_paths,
@@ -270,14 +289,10 @@ pub fn trace_street_plan(
                 &minor_curves
             },
             d_sep,
-            min_len,
+            params.min_len,
         )
         .into_iter()
         .unzip();
-
-        /* for path in &clipped_paths {
-            println!("Clipped length: {}", path.len());
-        } */
 
         println!("Pre: {pre}, post: {}", new_seeds.len());
 
@@ -304,7 +319,7 @@ fn trace_lanes(
     seeds: Vec<(usize, Point)>,
     tensor_field: &TensorField,
     h: f32,
-    d_sep: &(impl Fn(Point) -> f32 + Send + Sync + Clone),
+    d_sep: DSepFunc,
     follow_major_eigenvectors: bool,
     max_len: f32,
     previous_curves: &[HermiteCurve],
@@ -355,7 +370,7 @@ fn trace(
     tensor_field: &TensorField,
     seed: Point,
     h: f32,
-    d_sep: impl Fn(Point) -> f32,
+    d_sep: DSepFunc,
     follow_major_eigenvectors: bool,
     max_len: f32,
     previous_curves: &[HermiteCurve],
@@ -367,7 +382,7 @@ fn trace(
     let mut accumulated_distance = 0.0;
     let mut distance_since_last_seed = 0.0;
     let mut closest_distance_to_curves =
-        raycast_to_curve(seed, previous_curves).sqrt() - d_sep(seed);
+        raycast_to_curve(seed, previous_curves).sqrt() - d_sep.fp.call(seed);
     let mut distance_since_last_distance_check = 0.0;
     let mut new_seeds = vec![];
     let mut steps = 0;
@@ -441,7 +456,7 @@ fn trace(
         distance_since_last_seed += dist;
         distance_since_last_distance_check += dist;
 
-        if distance_since_last_seed >= d_sep(new_pos) {
+        if distance_since_last_seed >= d_sep.fp.call(new_pos) {
             distance_since_last_seed = 0.0;
             new_seeds.push((new_pos, accumulated_distance));
         }
@@ -449,7 +464,7 @@ fn trace(
 
         if distance_since_last_distance_check >= closest_distance_to_curves {
             let new_closest_distance =
-                raycast_to_curve(new_pos, previous_curves).sqrt() - d_sep(new_pos);
+                raycast_to_curve(new_pos, previous_curves).sqrt() - d_sep.fp.call(new_pos);
             if new_closest_distance <= 0.0 {
                 break;
             } else {
@@ -682,7 +697,7 @@ pub fn highest_curvature_points(path: &[Point], point_padding_per_side: usize) -
 fn clip_pass(
     curve_paths: Vec<SmoothedCurve>,
     previous_curves: &[HermiteCurve],
-    d_sep: impl Fn(Point) -> f32,
+    d_sep: DSepFunc,
     min_length: f32,
 ) -> Vec<(HermiteCurve, Vec<Point>)> {
     (1..curve_paths.len())
@@ -699,7 +714,7 @@ fn clip_pass(
                 .collect();
 
             if raycast_to_curve(current_curve[0].position, &prev_curves_as_hermite)
-                < (0.85 * d_sep(current_curve[0].position) * d_sep(current_curve[0].position))
+                < (0.85 * d_sep.fp.call(current_curve[0].position) * d_sep.fp.call(current_curve[0].position))
             {
                 return None;
             }
@@ -713,7 +728,7 @@ fn clip_pass(
 
             let mut clipped_index = 0;
             for (i, dist_squared) in control_point_distances_squared.iter().enumerate() {
-                let d_sep_val = d_sep(current_curve[i].position);
+                let d_sep_val = d_sep.fp.call(current_curve[i].position);
                 /* let pos = Vector2::new(
                     (current_curve[i].position.x as u32).clamp(0, GRID_SIZE - 1),
                     (current_curve[i].position.y as u32).clamp(0, GRID_SIZE - 1),
@@ -935,6 +950,104 @@ fn snap_point_to_point(
         })
     } else {
         None
+    }
+}
+
+pub struct StreetPlanNetworks {
+    pub major_network: Vec<Vec<Point>>,
+    pub minor_network: Vec<Vec<Point>>,
+    pub all_curves: Vec<HermiteCurve>,
+}
+
+pub fn generate_street_plan(
+    major_params: TraceParams,
+    minor_params: TraceParams,
+    tensor_field: &TensorField,
+    water_mask: &DynamicImage,
+    city_center: Option<Point>,
+    major_seeds: TraceSeeds,
+) -> StreetPlanNetworks {
+    let (major_network_major_curves_unconnected, major_network_minor_curves_unconnected) =
+        trace_street_plan(
+            major_params,
+            &tensor_field,
+            &water_mask,
+            major_seeds,
+            city_center,
+            Vec::new(),
+            Vec::new(),
+            &water_mask,
+        );
+
+    let major_network_major_curves_len = major_network_major_curves_unconnected.len();
+
+    let major_network_curves_unconnected: Vec<HermiteCurve> =
+        major_network_major_curves_unconnected
+            .into_iter()
+            .chain(major_network_minor_curves_unconnected)
+            .collect();
+    let major_network_merge_distance = 5.0;
+    let major_network_curves = merge_road_endings(
+        &major_network_curves_unconnected,
+        major_network_merge_distance,
+    );
+
+    let minor_network_seed_points: Vec<SeedPoint> = major_network_curves
+        .iter()
+        .flat_map(|curve| {
+            (0..curve.len() - 1)
+                .map(|i| SeedPoint {
+                    seed: (curve[i].position + curve[i + 1].position) / 2.0,
+                    priority: 0.0,
+                    follow_major_eigenvectors: i > major_network_major_curves_len,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    let major_network: Vec<Vec<Point>> = major_network_curves
+        .par_iter()
+        .map(|curve| resample_curve(curve, 20))
+        .collect();
+
+    let (minor_network_major_curves_unconnected, minor_network_minor_curves_unconnected) =
+        trace_street_plan(
+            minor_params,
+            &tensor_field,
+            &water_mask,
+            TraceSeeds::Specific(minor_network_seed_points),
+            city_center,
+            major_network_curves[..major_network_major_curves_len].to_vec(),
+            major_network_curves[major_network_major_curves_len..].to_vec(),
+            &water_mask,
+        );
+
+    let minor_network_curves_unconnected: Vec<HermiteCurve> =
+        minor_network_major_curves_unconnected
+            .into_iter()
+            .chain(minor_network_minor_curves_unconnected)
+            .collect();
+    let minor_network_merge_distance = 3.0;
+
+    let minor_network_curves = merge_road_endings(
+        &minor_network_curves_unconnected,
+        minor_network_merge_distance,
+    );
+
+    let minor_network: Vec<Vec<Point>> = minor_network_curves
+        .par_iter()
+        .map(|curve| resample_curve(curve, 20))
+        .collect();
+
+    let all_curves: Vec<HermiteCurve> = minor_network_curves
+        .into_iter()
+        .chain(major_network_curves)
+        .collect();
+
+    StreetPlanNetworks {
+        major_network,
+        minor_network,
+        all_curves,
     }
 }
 
