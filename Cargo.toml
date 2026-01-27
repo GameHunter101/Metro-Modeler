@@ -1,13 +1,13 @@
 [package]
 name = "metro_modeler"
-version = "0.2.33"
+version = "0.2.34"
 edition = "2024"
 
 [dependencies]
 image = "0.25.6"
 nalgebra = "0.33.2"
 rand = "0.9.1"
-wgpu = "24.0.1"
+wgpu = "28.0.0"
 v4 = { git = "https://github.com/GameHunter101/V4-Engine" }
 tokio = { version = "1.45.1", features = ["full"] }
 bytemuck = "1.23.0"
@@ -22,3 +22,4 @@ dyn-clone = "1.0.20"
 rand_distr = "0.5.1"
 async-trait = "0.1.89"
 winit = "0.29.15"
+algoe = { git = "https://github.com/GameHunter101/Algoe" }

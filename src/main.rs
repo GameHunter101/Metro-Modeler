@@ -14,7 +14,7 @@ use v4::{
     ecs::material::{ShaderAttachment, ShaderTextureAttachment},
     scene,
 };
-use wgpu::vertex_attr_array;
+use wgpu::{Features, vertex_attr_array};
 
 use crate::field_visualization_component::{
     FieldVisualizationComponent, create_visualizer_textures,
@@ -141,7 +141,6 @@ async fn main() {
     let verts_for_triangulation: Vec<Vertex> = faces.into_iter().flatten().collect();
 
     let mut engine = v4::V4::builder()
-        .features(wgpu::Features::POLYGON_MODE_LINE | wgpu::Features::POLYGON_MODE_POINT)
         .window_settings(
             GRID_SIZE as u32 * 2,
             GRID_SIZE as u32 * 2,
@@ -151,11 +150,13 @@ async fn main() {
         .hide_cursor(true)
         .antialiasing_enabled(true)
         .features(
-            wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
-                | wgpu::Features::POLYGON_MODE_LINE,
+            Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+                | Features::POLYGON_MODE_LINE
+                | Features::IMMEDIATES,
         )
         .limits(wgpu::Limits {
             max_bind_groups: 5,
+            max_immediate_size: 4,
             ..Default::default()
         })
         .build()
@@ -272,7 +273,9 @@ async fn main() {
                 FieldVisualizationComponent(
                     compute: ident("compute"),
                     material: ident("vis_mat"),
-                    street_transform: ident("street_transform")
+                    street_mat: ident("network_mat"),
+                    street_transform: ident("street_transform"),
+                    plot_entity: ident("plots"),
                 )
             ],
             computes: [
@@ -312,8 +315,11 @@ async fn main() {
                         topology: wgpu::PrimitiveTopology::LineList,
                         polygon_mode: wgpu::PolygonMode::Line,
                     },
+                    immediate_size: 4,
                     ident: "network_pipeline",
-                }
+                },
+                immediate_data: bytemuck::cast_slice(&[0_u32]).to_vec(),
+                ident: "network_mat",
             },
             components: [
                 MeshComponent(
@@ -357,7 +363,7 @@ async fn main() {
                 TransformComponent(position: nalgebra::Vector3::new(0.0, 0.0, 0.0), ident: "street_transform")
             ]
         },
-        /* "plots" = {
+        "plots" = {
             material: {
                 pipeline: {
                     vertex_shader_path: "./shaders/buildings_vertex.wgsl",
@@ -373,8 +379,9 @@ async fn main() {
                     enabled_models: vec![(0, None)]
                 ),
                 TransformComponent(position: nalgebra::Vector3::new(0.0, 0.0, 0.0))
-            ]
-        }, */
+            ],
+            is_enabled: false,
+        },
         "cam_ent" = {
             components: [
                 CameraComponent(field_of_view: 80.0, aspect_ratio: 1.0, near_plane: 0.1, far_plane: GRID_SIZE as f32, sensitivity: 0.002, movement_speed: 0.05, ident: "cam"),

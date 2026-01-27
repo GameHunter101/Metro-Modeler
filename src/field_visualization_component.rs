@@ -1,13 +1,11 @@
+use algoe::bivector::Bivector;
 use image::{EncodableLayout, ImageBuffer, Rgba};
+use nalgebra::Vector3;
 use rand::Rng;
 use v4::{
-    builtin_components::transform_component::TransformComponent,
-    component,
-    ecs::{
-        component::{Component, ComponentDetails, ComponentId, ComponentSystem, UpdateParams},
-        compute::Compute,
-        material::{GeneralTexture, Material, ShaderAttachment},
-    }, engine_support::texture_support::Texture,
+    builtin_actions::EntityToggleAction, builtin_components::transform_component::TransformComponent, component, ecs::{
+        component::{Component, ComponentDetails, ComponentId, ComponentSystem, UpdateParams}, compute::Compute, entity::EntityId, material::{GeneralTexture, Material, ShaderAttachment}
+    }, engine_support::texture_support::Texture
 };
 use wgpu::{CommandEncoder, Device, Extent3d, Queue, TextureUsages};
 
@@ -17,7 +15,9 @@ use crate::tensor_field::{EvalEigenvectors, GRID_SIZE, Point, TensorField};
 pub struct FieldVisualizationComponent {
     compute: ComponentId,
     material: ComponentId,
+    street_mat: ComponentId,
     street_transform: ComponentId,
+    plot_entity: EntityId,
     #[default(0)]
     time: u32,
     #[default(true)]
@@ -75,13 +75,44 @@ impl ComponentSystem for FieldVisualizationComponent {
                 && let Some(street_transform_component) =
                     street_transform.downcast_mut::<TransformComponent>()
             {
+                street_transform_component.set_position(if self.show {
+                    Vector3::zeros()
+                } else {
+                    GRID_SIZE as f32 / 2.0 * Vector3::new(1.0, 0.0, 1.0)
+                });
                 street_transform_component.set_scale(
-                    if !self.show { 0.5_f32 } else { 1.0 } * nalgebra::Vector3::new(1.0, 1.0, 1.0),
+                    if self.show {
+                        1.0_f32
+                    } else {
+                        GRID_SIZE as f32 / 2.0
+                    } * nalgebra::Vector3::new(1.0, 1.0, 1.0),
+                );
+                street_transform_component.set_rotation(
+                    Bivector::new(
+                        0.0,
+                        if self.show {
+                            0.0
+                        } else {
+                            -std::f32::consts::FRAC_PI_4
+                        },
+                        0.0,
+                    )
+                    .exponentiate(),
                 );
             }
-        }
 
-        Vec::new()
+            if let Some(street_mat) = materials
+                .iter_mut()
+                .filter(|mat| mat.id() == self.street_mat)
+                .next()
+            {
+                street_mat.set_immediate_data(bytemuck::cast_slice(&[!self.show as u32]));
+            }
+
+            vec![Box::new(EntityToggleAction(self.plot_entity, None))]
+        } else {
+            Vec::new()
+        }
     }
 
     fn command_encoder_operations(
@@ -244,4 +275,3 @@ pub fn create_visualizer_textures(
         visualization_output_tex,
     )
 }
-

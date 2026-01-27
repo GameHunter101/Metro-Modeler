@@ -24,6 +24,8 @@ struct Camera {
 @group(0) @binding(0)
 var<uniform> camera: Camera;
 
+var<immediate> use_camera_flag: u32;
+
 @vertex
 fn main(input: VertexInput, transform: TransformData) -> VertexOutput {
     let transform_mat = mat4x4<f32>(
@@ -34,8 +36,11 @@ fn main(input: VertexInput, transform: TransformData) -> VertexOutput {
     );
 
     var out: VertexOutput;
-    // out.pos = camera.mat * (transform_mat * vec4f(input.position, 1.0));
-    out.pos = transform_mat * vec4f(input.position, 1.0);
+    if bool(use_camera_flag) {
+        out.pos = camera.mat * (transform_mat * vec4f(input.position, 1.0));
+    } else {
+        out.pos = transform_mat * vec4f(input.position, 1.0);
+    }
     out.col = input.col;
     return out;
 }
