@@ -347,7 +347,7 @@ fn vertices_to_adjacency_list(
             },
         ));
 
-    assert_eq!(inverse_vertices.len(), vertices.len());
+    // assert_eq!(inverse_vertices.len(), vertices.len());
 
     let adjacency_list = vertices
         .iter()

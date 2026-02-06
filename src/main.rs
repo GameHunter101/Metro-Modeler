@@ -3,8 +3,9 @@
 use image::{GenericImage, ImageReader, Rgba};
 use street_graph::path_to_graph;
 use tensor_field::{DesignElement, GRID_SIZE, Point, TensorField};
+use v4::ecs::component::ComponentSystem;
 use v4::ecs::compute::Compute;
-use v4::ecs::material::ShaderBufferAttachment;
+use v4::engine_support::texture_support::{TextureBundle, TextureProperties};
 use v4::{
     builtin_components::{
         camera_component::CameraComponent,
@@ -169,8 +170,44 @@ async fn main() {
     let device = rendering_manager.device();
     let queue = rendering_manager.queue();
 
-    let (compute_textures, [blending_tex, tensorfield_vis_tex], compute_output_tex) =
+    let (compute_textures, (_, blending_bundle), (compute_output_tex, compute_output_bundle)) =
         create_visualizer_textures(device, queue, &tensor_field);
+
+    let tensorfield_vis_bundle = TextureBundle::new(
+        compute_output_tex.create_view(&wgpu::TextureViewDescriptor::default()),
+        TextureProperties {
+            storage_texture: None,
+            is_sampled: true,
+            extra_usages: wgpu::TextureUsages::TEXTURE_BINDING,
+            ..compute_output_bundle.properties()
+        },
+    );
+
+    let mut tensorfield_visualization_compute = Compute::builder()
+        .attachments(
+            compute_textures
+                .into_iter()
+                .map(|(_, tex_bundle)| {
+                    ShaderAttachment::Texture(ShaderTextureAttachment {
+                        texture_bundle: tex_bundle,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                    })
+                })
+                .chain([
+                    ShaderAttachment::Texture(ShaderTextureAttachment {
+                        texture_bundle: compute_output_bundle,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                    }),
+                ])
+                .collect(),
+        )
+        .shader_path("shaders/field_visualization_compute.wgsl")
+        .workgroup_counts((4, GRID_SIZE, 1))
+        .build();
+
+    tensorfield_visualization_compute.initialize(device);
+
+    rendering_manager.individual_compute_execution(&[tensorfield_visualization_compute]);
 
     scene! {
         scene: visualizer,
@@ -229,11 +266,11 @@ async fn main() {
                 },
                 attachments: [
                     Texture(
-                        texture: tensorfield_vis_tex,
+                        texture_bundle: tensorfield_vis_bundle,
                         visibility: wgpu::ShaderStages::FRAGMENT
                     ),
                     Texture(
-                        texture: blending_tex,
+                        texture_bundle: blending_bundle,
                         visibility: wgpu::ShaderStages::FRAGMENT
                     ),
                 ],
@@ -271,38 +308,38 @@ async fn main() {
                     enabled_models: vec![(0, None)]
                 ),
                 FieldVisualizationComponent(
-                    compute: ident("compute"),
+                    // compute: ident("compute"),
                     material: ident("vis_mat"),
                     street_mat: ident("network_mat"),
                     street_transform: ident("street_transform"),
                     plot_entity: ident("plots"),
                 )
             ],
-            computes: [
+            /* computes: [
                 Compute(
-                    input: compute_textures.into_iter().map(|tex|
+                    attachments: compute_textures.into_iter().map(|(_, tex_bundle)|
                         ShaderAttachment::Texture(ShaderTextureAttachment {
-                            texture: tex,
+                            texture_bundle: tex_bundle,
                             visibility: wgpu::ShaderStages::COMPUTE,
-                            extra_usages: wgpu::TextureUsages::empty(),
                         })
-                    ).chain(Some(ShaderAttachment::Buffer(ShaderBufferAttachment::new(
-                        device,
-                        bytemuck::cast_slice(&[0_u32]),
-                        wgpu::BufferBindingType::Uniform,
-                        wgpu::ShaderStages::COMPUTE,
-                        wgpu::BufferUsages::COPY_DST
-                    )))).collect(),
-                    output: ShaderAttachment::Texture(ShaderTextureAttachment {
-                        texture: compute_output_tex,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        extra_usages: wgpu::TextureUsages::empty(),
-                    }),
+                    ).chain([
+                        ShaderAttachment::Buffer(ShaderBufferAttachment::new(
+                            device,
+                            bytemuck::cast_slice(&[0_u32]),
+                            wgpu::BufferBindingType::Uniform,
+                            wgpu::ShaderStages::COMPUTE,
+                            wgpu::BufferUsages::COPY_DST
+                        )),
+                        ShaderAttachment::Texture(ShaderTextureAttachment {
+                            texture_bundle: compute_output_bundle,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                        }),
+                    ]).collect(),
                     shader_path: "shaders/field_visualization_compute.wgsl",
                     workgroup_counts: (4, GRID_SIZE, 1),
                     ident: "compute"
                 )
-            ],
+            ], */
         },
         "street_network" = {
             material: {

@@ -3,57 +3,39 @@ use image::{EncodableLayout, ImageBuffer, Rgba};
 use nalgebra::Vector3;
 use rand::Rng;
 use v4::{
-    builtin_actions::EntityToggleAction, builtin_components::transform_component::TransformComponent, component, ecs::{
-        component::{Component, ComponentDetails, ComponentId, ComponentSystem, UpdateParams}, compute::Compute, entity::EntityId, material::{GeneralTexture, Material, ShaderAttachment}
-    }, engine_support::texture_support::Texture
+    builtin_actions::EntityToggleAction,
+    builtin_components::transform_component::TransformComponent,
+    component,
+    ecs::{
+        component::{ComponentDetails, ComponentId, ComponentSystem, UpdateParams},
+        entity::EntityId,
+    },
+    engine_support::texture_support::{CompleteTexture, TextureBundle, TextureProperties},
 };
-use wgpu::{CommandEncoder, Device, Extent3d, Queue, TextureUsages};
+use wgpu::{Device, Queue, TextureUsages};
 
 use crate::tensor_field::{EvalEigenvectors, GRID_SIZE, Point, TensorField};
 
 #[component]
 pub struct FieldVisualizationComponent {
-    compute: ComponentId,
     material: ComponentId,
     street_mat: ComponentId,
     street_transform: ComponentId,
     plot_entity: EntityId,
-    #[default(0)]
-    time: u32,
     #[default(true)]
     show: bool,
 }
 
-#[async_trait::async_trait]
 impl ComponentSystem for FieldVisualizationComponent {
-    async fn update(
+    fn update(
         &mut self,
         UpdateParams {
-            queue,
-            computes,
             input_manager,
             materials,
             other_components,
             ..
         }: UpdateParams<'_, '_>,
     ) -> v4::ecs::actions::ActionQueue {
-        if self.show {
-            let compute = computes
-                .iter()
-                .filter(|comp| comp.id() == self.compute)
-                .next()
-                .unwrap();
-
-            self.time += 1;
-
-            let time_attachment = &compute.input_attachments()[3];
-            if let ShaderAttachment::Buffer(time_buf) = time_attachment {
-                queue.write_buffer(time_buf.buffer(), 0, bytemuck::cast_slice(&[self.time]));
-            }
-        }
-
-        let mut other_components = other_components.lock().unwrap();
-
         let street_transform = other_components
             .iter_mut()
             .filter(|comp| comp.id() == self.street_transform)
@@ -62,7 +44,6 @@ impl ComponentSystem for FieldVisualizationComponent {
         if input_manager.key_pressed(winit::keyboard::KeyCode::KeyT) {
             self.show = !self.show;
 
-            let mut materials = materials.lock().unwrap();
             if let Some(mat) = materials
                 .iter_mut()
                 .filter(|mat| mat.id() == self.material)
@@ -115,7 +96,7 @@ impl ComponentSystem for FieldVisualizationComponent {
         }
     }
 
-    fn command_encoder_operations(
+    /* fn command_encoder_operations(
         &self,
         _device: &Device,
         _queue: &Queue,
@@ -140,7 +121,7 @@ impl ComponentSystem for FieldVisualizationComponent {
             .next()
             .unwrap();
 
-        let output = compute.output_attachments().unwrap();
+        let output = compute.attachments().unwrap();
 
         let vis = &material.attachments()[0];
 
@@ -157,7 +138,7 @@ impl ComponentSystem for FieldVisualizationComponent {
                 },
             );
         }
-    }
+    } */
 }
 
 fn smooth_field(eigenvector: Point) -> [u8; 4] {
@@ -185,7 +166,7 @@ pub fn create_visualizer_textures(
     device: &Device,
     queue: &Queue,
     tensor_field: &TensorField,
-) -> ([GeneralTexture; 3], [GeneralTexture; 2], GeneralTexture) {
+) -> ([CompleteTexture; 3], CompleteTexture, CompleteTexture) {
     let mut rng = rand::rng();
 
     let visualization_input_img = ImageBuffer::from_fn(GRID_SIZE, GRID_SIZE, |_, _| {
@@ -197,7 +178,6 @@ pub fn create_visualizer_textures(
     let mut major_eigenvector_img = visualization_output_img.clone();
     let mut minor_eigenvector_img = major_eigenvector_img.clone();
     let mut blending_img = minor_eigenvector_img.clone();
-    let tensorfield_vis_img = blending_img.clone();
 
     for y in 0..GRID_SIZE {
         for x in 0..GRID_SIZE {
@@ -217,53 +197,53 @@ pub fn create_visualizer_textures(
         }
     }
 
-    let [visualization_input_tex, visualization_output_tex] = [
-        (visualization_input_img, TextureUsages::empty()),
-        (visualization_output_img, TextureUsages::COPY_SRC),
-    ]
-    .map(|(img, usages)| {
-        Texture::from_bytes(
-            img.as_bytes(),
-            (GRID_SIZE, GRID_SIZE),
-            device,
-            queue,
-            wgpu::TextureFormat::Rgba8Unorm,
-            Some(wgpu::StorageTextureAccess::ReadWrite),
-            false,
-            usages,
-        )
-    });
-
-    let [major_eigenvector_tex, minor_eigenvector_tex] =
-        [major_eigenvector_img, minor_eigenvector_img].map(|img| {
-            Texture::from_bytes(
+    let [visualization_input_tex, visualization_output_tex] =
+        [visualization_input_img, visualization_output_img].map(|img| {
+            TextureBundle::from_bytes(
                 img.as_bytes(),
                 (GRID_SIZE, GRID_SIZE),
                 device,
                 queue,
-                wgpu::TextureFormat::Rgba8Unorm,
-                None,
-                false,
-                TextureUsages::empty(),
+                TextureProperties {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    storage_texture: Some(wgpu::StorageTextureAccess::ReadWrite),
+                    is_sampled: false,
+                    extra_usages: TextureUsages::TEXTURE_BINDING,
+                    ..Default::default()
+                },
             )
         });
 
-    let [blending_tex, tensorfield_vis_tex] = [
-        (blending_img, TextureUsages::empty()),
-        (tensorfield_vis_img, TextureUsages::COPY_DST),
-    ]
-    .map(|(img, usage)| {
-        Texture::from_bytes(
-            img.as_bytes(),
-            (GRID_SIZE, GRID_SIZE),
-            device,
-            queue,
-            wgpu::TextureFormat::Rgba8Unorm,
-            None,
-            true,
-            usage,
-        )
-    });
+    let [major_eigenvector_tex, minor_eigenvector_tex] =
+        [major_eigenvector_img, minor_eigenvector_img].map(|img| {
+            TextureBundle::from_bytes(
+                img.as_bytes(),
+                (GRID_SIZE, GRID_SIZE),
+                device,
+                queue,
+                TextureProperties {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    storage_texture: None,
+                    is_sampled: false,
+                    extra_usages: TextureUsages::empty(),
+                    ..Default::default()
+                },
+            )
+        });
+
+    let blending_tex = TextureBundle::from_bytes(
+        blending_img.as_bytes(),
+        (GRID_SIZE, GRID_SIZE),
+        device,
+        queue,
+        TextureProperties {
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            storage_texture: None,
+            is_sampled: true,
+            extra_usages: TextureUsages::TEXTURE_BINDING,
+            ..Default::default()
+        },
+    );
 
     (
         [
@@ -271,7 +251,7 @@ pub fn create_visualizer_textures(
             major_eigenvector_tex,
             minor_eigenvector_tex,
         ],
-        [blending_tex, tensorfield_vis_tex],
+        blending_tex,
         visualization_output_tex,
     )
 }

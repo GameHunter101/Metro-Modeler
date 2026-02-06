@@ -1,23 +1,22 @@
 @group(0) @binding(0) var input: texture_storage_2d<rgba8unorm, read_write>;
-@group(1) @binding(0) var major_eigenvector: texture_2d<f32>;
-@group(2) @binding(0) var minor_eigenvector: texture_2d<f32>;
-@group(3) @binding(0) var<uniform> time: u32;
+@group(0) @binding(1) var major_eigenvector: texture_2d<f32>;
+@group(0) @binding(2) var minor_eigenvector: texture_2d<f32>;
 
-@group(4) @binding(0) var output: texture_storage_2d<rgba8unorm, read_write>;
+@group(0) @binding(3) var output: texture_storage_2d<rgba8unorm, read_write>;
 
 fn random(coord: vec2<u32>) -> f32 {
-    let input = (coord.x + coord.y * 512);
-    let state = input * 747796405 + 2891336453;
-    let word = ((state >> ((state >> 28) + 4)) ^ state) * 277803737;
-    return f32((word >> 22) ^ word) / f32(0xffffffff);
+    let input = (coord.x + coord.y * 512u);
+    let state = input * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return f32((word >> 22u) ^ word) / f32(0xffffffff);
 }
 
 fn bilerp(coord: vec2<f32>) -> vec4<f32> {
     let coord_floor = vec2u(coord);
     let bl = textureLoad(input, coord_floor);
-    let br = textureLoad(input, coord_floor + vec2u(1, 0));
-    let tl = textureLoad(input, coord_floor + vec2u(0, 1));
-    let tr = textureLoad(input, coord_floor + vec2u(1, 1));
+    let br = textureLoad(input, coord_floor + vec2u(1u, 0u));
+    let tl = textureLoad(input, coord_floor + vec2u(0u, 1u));
+    let tr = textureLoad(input, coord_floor + vec2u(1u, 1u));
 
     return mix(mix(bl, br, fract(coord.x)), mix(tl, tr, fract(coord.x)), fract(coord.y));
 }
@@ -71,7 +70,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let minor_prev_val_x = lic(vec2f(id.xy), lic_len, true, minor_eigenvector);
     let minor_prev_val_y = lic(vec2f(id.xy), lic_len, false, minor_eigenvector);
 
-    textureStore(output, id.xy, vec4f(
+    textureStore(output, vec2i(id.xy), vec4f(
         major_prev_val_x, major_prev_val_y, minor_prev_val_x, minor_prev_val_y
     ));
 }

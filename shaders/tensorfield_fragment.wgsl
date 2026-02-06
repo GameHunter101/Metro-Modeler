@@ -1,6 +1,6 @@
 @group(0) @binding(0) var tex: texture_2d<f32>;
-@group(1) @binding(0) var blend: texture_2d<f32>;
-@group(2) @binding(0) var sample: sampler;
+@group(0) @binding(1) var blend: texture_2d<f32>;
+@group(0) @binding(2) var sample: sampler;
 
 struct VertexOutput {
     @builtin(position) pos: vec4<f32>,
